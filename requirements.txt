@@ -2,7 +2,6 @@ streamlit>=1.31.0
 pandas>=2.2.0
 plotly>=5.18.0
 opencv-contrib-python>=4.9.0
-opencv-python>=4.9.0
 instaloader>=4.12.0
 facebook-scraper>=0.2.62
 requests>=2.31.0

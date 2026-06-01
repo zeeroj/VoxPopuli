@@ -2,8 +2,11 @@ import os
 import tempfile
 import json
 import facebook_scraper as fb
-from config import USER_AGENT, COOKIES_PATH
+from config import USER_AGENT
 from utils.helpers import is_poll_post
+
+
+FB_COOKIES_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "cookies.txt")
 
 
 class FacebookScraper:
@@ -12,9 +15,9 @@ class FacebookScraper:
         self._load_cookies()
 
     def _load_cookies(self):
-        if os.path.exists(COOKIES_PATH):
+        if os.path.exists(FB_COOKIES_PATH):
             try:
-                jar = fb.parse_cookie_file(COOKIES_PATH)
+                jar = fb.parse_cookie_file(FB_COOKIES_PATH)
                 fb.set_cookies(jar)
                 fb.set_user_agent(USER_AGENT)
                 self._authenticated = True
