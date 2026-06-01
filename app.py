@@ -160,6 +160,7 @@ def save_and_analyze(search_id, all_posts, face_matcher, progress_callback=None)
             )
 
         try:
+            posted_at = post.get("posted_at") or datetime.utcnow().isoformat()
             db.execute("""
                 INSERT OR IGNORE INTO posts
                 (search_id, platform, post_id, url, caption, image_url, posted_at, is_poll)
@@ -167,7 +168,7 @@ def save_and_analyze(search_id, all_posts, face_matcher, progress_callback=None)
             """, (
                 search_id, platform, str(post.get("post_id", ""))[:200],
                 post.get("url", ""), post.get("caption", ""),
-                post.get("image_url", None), post.get("posted_at"),
+                post.get("image_url", None), posted_at,
                 1 if is_poll_post(post.get("caption", "")) else 0,
             ))
         except Exception:
@@ -208,10 +209,15 @@ def save_and_analyze(search_id, all_posts, face_matcher, progress_callback=None)
                     """, (post_db_id, ident["candidate_key"], ident["confidence"], "face_recognition"))
 
         caption = post.get("caption", "") or ""
+        caption_lower = caption.lower()
         for candidate_key, info in CANDIDATES.items():
-            for search_term in info["search_terms"]:
-                clean_term = search_term.replace("#", "").lower()
-                if clean_term in caption.lower():
+            terms_to_check = list(info.get("search_terms", []))
+            terms_to_check.append(info["name"])
+            for kw in info.get("keywords", []):
+                terms_to_check.append(kw)
+            terms_to_check = list(set(t.lower().replace("#", "") for t in terms_to_check))
+            for term in terms_to_check:
+                if term and term in caption_lower:
                     existing = db.execute(
                         "SELECT id FROM post_candidates WHERE post_id=? AND candidate_key=?",
                         (post_db_id, candidate_key)
@@ -222,6 +228,7 @@ def save_and_analyze(search_id, all_posts, face_matcher, progress_callback=None)
                             (post_id, candidate_key, confidence, detection_method)
                             VALUES (?, ?, ?, ?)
                         """, (post_db_id, candidate_key, 0.7, "text_match"))
+                    break
 
     db.commit()
     db.execute("UPDATE searches SET status='completed' WHERE id=?", (search_id,))

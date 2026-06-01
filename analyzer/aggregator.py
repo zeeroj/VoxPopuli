@@ -28,7 +28,9 @@ class Aggregator:
             return self._empty_summary()
 
         df["posted_at"] = pd.to_datetime(df["posted_at"], errors="coerce")
-        df = df.dropna(subset=["posted_at"])
+        df["scraped_at"] = pd.to_datetime(df["scraped_at"], errors="coerce")
+        df["posted_at"] = df["posted_at"].fillna(df["scraped_at"])
+        df["posted_at"] = df["posted_at"].fillna(datetime.utcnow())
 
         return self._build_summary(df, search_id)
 
@@ -134,7 +136,11 @@ class Aggregator:
     def _build_timeline(self, df):
         if df.empty:
             return []
-        df["date"] = df["posted_at"].dt.date
+        valid_dates = df["posted_at"].dropna()
+        if valid_dates.empty:
+            return []
+        df["date"] = valid_dates.dt.date
+        df = df.dropna(subset=["date"])
         timeline = (
             df.groupby(["date", "candidate_key"])
             .size()
