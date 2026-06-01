@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+data/*.db
+data/*.pkl
+data/*.yml
+data/cookies.txt
+data/scraped/
+*.jpg
+*.png
+*.jpeg
+.vscode/
+.idea/
+*.egg-info/
+dist/
+build/
