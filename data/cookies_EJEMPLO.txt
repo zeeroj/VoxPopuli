@@ -1,0 +1,8 @@
+# Exporta tus cookies de Facebook aquí
+# 1. Instala "Get cookies.txt LOCALLY" en Chrome/Firefox
+# 2. Ve a facebook.com, asegúrate de estar logueado
+# 3. Usa la extensión para exportar cookies.txt
+# 4. Guarda el archivo aquí como cookies.txt
+# 
+# Sin este archivo, el sistema solo busca datos públicos (Reddit, noticias, DDGS)
+# Con este archivo, también scrapea likes/comments/reacciones reales de Facebook

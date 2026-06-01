@@ -8,6 +8,7 @@ import time
 from config import CANDIDATES, PLATFORMS
 from database.db import init_db, get_db
 from scraper.web_searcher import WebSearcher
+from scraper.facebook_scraper import FacebookScraper
 from scraper.post_fetcher import fetch_reddit_data, fetch_reddit_comments, analyze_comments_for_candidates
 from analyzer.aggregator import Aggregator
 from utils.helpers import is_poll_post
@@ -51,11 +52,17 @@ with st.sidebar:
     if st.button("🔍 INICIAR BUSQUEDA MASIVA", type="primary", use_container_width=True):
         st.session_state.trigger_search = True
     st.divider()
+    fb_cookies = os.path.exists(os.path.join("data", "cookies.txt"))
+    if fb_cookies:
+        st.caption("✅ **Facebook:** cookies detectadas")
+    else:
+        st.caption("❌ **Facebook:** sin cookies (solo datos publicos)")
+        st.caption("   Exportá cookies.txt a data/cookies.txt para datos de FB")
     st.caption("**Como funciona:**")
-    st.caption("1. Genera 50+ combinaciones de busqueda")
-    st.caption("2. Busca en todo internet (DuckDuckGo)")
-    st.caption("3. Extrae % y reacciones de cada resultado")
-    st.caption("4. Scrapea Reddit API para engagement real")
+    st.caption("1. Genera 513 combinaciones de busqueda")
+    st.caption("2. Busca en internet (DuckDuckGo + Facebook si hay cookies)")
+    st.caption("3. Extrae % de encuestas y reacciones reales")
+    st.caption("4. Scrapea Reddit API + Facebook para engagement real")
     st.caption("5. Determina ganador por encuesta")
     st.caption("6. Muestra URLs verificables")
 
@@ -69,7 +76,21 @@ if st.session_state.get("trigger_search"):
 
     results = ws.search_all_platforms(max_per_query=6, max_total=max_results)
     total_found = len(results)
-    status.text(f"Encontrados {total_found} resultados. Guardando en DB...")
+
+    fb_scraper = FacebookScraper()
+    if fb_scraper.is_authenticated():
+        status.text("Cookies de Facebook detectadas. Buscando en Facebook...")
+        for page in fb_scraper.get_known_political_pages():
+            fb_posts = fb_scraper.get_page_posts(page, pages=2)
+            for fp in fb_posts:
+                results.append(fp)
+            if len(fb_posts) > 0:
+                break
+        status.text(f"Encontrados {total_found} (+ FB) resultados. Guardando en DB...")
+    else:
+        status.text("Sin cookies de Facebook. Buscando solo datos publicos...")
+
+    total_found = len(results)
 
     db = get_db()
     cursor = db.execute("INSERT INTO searches (keywords, status) VALUES ('auto-generada', 'running')")
@@ -132,6 +153,15 @@ if st.session_state.get("trigger_search"):
                 total_engagement += int(comments)
             except Exception:
                 pass
+
+        reactions = post.get("reactions", {})
+        if reactions:
+            for rtype, rcount in reactions.items():
+                try:
+                    db.execute("INSERT OR IGNORE INTO reactions (post_id, reaction_type, count) VALUES (?, ?, ?)",
+                               (pid, str(rtype).lower(), int(rcount)))
+                except Exception:
+                    pass
 
         caption = post.get("caption", "") or ""
         caption_lower = caption.lower()

@@ -1,121 +1,107 @@
 import os
 import tempfile
-import time
-import random
-from datetime import datetime
-from .base import BaseScraper
-from utils.helpers import parse_date, is_poll_post, safe_get
-from ddgs import DDGS
-import requests
-
-try:
-    import facebook_scraper as fb
-    FB_SCRAPER_AVAILABLE = True
-except ImportError:
-    FB_SCRAPER_AVAILABLE = False
+import json
+import facebook_scraper as fb
+from config import USER_AGENT, COOKIES_PATH
+from utils.helpers import is_poll_post
 
 
-class FacebookScraper(BaseScraper):
+class FacebookScraper:
     def __init__(self):
-        super().__init__("facebook", rate_limit=5)
-        self._fb_available = FB_SCRAPER_AVAILABLE
+        self._authenticated = False
+        self._load_cookies()
 
-    def search(self, keyword, date_from=None, date_to=None, max_posts=30):
-        results = []
-        date_from_dt = parse_date(date_from)
-        date_to_dt = parse_date(date_to)
-
-        if self._fb_available:
+    def _load_cookies(self):
+        if os.path.exists(COOKIES_PATH):
             try:
-                posts = fb.search_posts(
-                    keyword,
-                    options={"allow_extra_requests": False, "posts_per_page": 10},
-                    timeout=30,
-                )
-                count = 0
-                for post in posts:
-                    if count >= max_posts:
-                        break
-                    try:
-                        post_text = post.get("text", "") or ""
-                        post_time = post.get("time")
-                        post_date = None
-                        if post_time:
-                            try:
-                                post_date = datetime.fromtimestamp(post_time)
-                            except Exception:
-                                pass
+                jar = fb.parse_cookie_file(COOKIES_PATH)
+                fb.set_cookies(jar)
+                fb.set_user_agent(USER_AGENT)
+                self._authenticated = True
+            except Exception as e:
+                self._authenticated = False
 
-                        if date_from_dt and post_date and post_date < date_from_dt:
-                            continue
-                        if date_to_dt and post_date and post_date > date_to_dt:
-                            continue
+    def is_authenticated(self):
+        return self._authenticated
 
-                        post_data = {
-                            "post_id": str(post.get("post_id", "")),
-                            "url": post.get("post_url", ""),
-                            "caption": post_text[:2000],
-                            "image_url": post.get("image", None),
-                            "posted_at": post_date.isoformat() if post_date else None,
-                            "is_poll": is_poll_post(post_text),
-                            "likes": safe_get(post, "likes", 0),
-                            "comments_count": safe_get(post, "comments", 0),
-                            "shares": safe_get(post, "shares", 0),
-                            "reactions": post.get("reactions", {}),
-                        }
-                        results.append(post_data)
-                        count += 1
-                    except Exception:
-                        continue
+    def search_by_keyword(self, keyword, pages=5):
+        if not self._authenticated:
+            return []
+        results = []
+        try:
+            posts = fb.get_posts_by_search(keyword, pages=pages)
+            for post in posts:
+                p = self._extract_post(post)
+                if p:
+                    p["keyword"] = keyword
+                    results.append(p)
+        except Exception:
+            pass
+        return results
+
+    def get_page_posts(self, page_name, pages=3):
+        if not self._authenticated:
+            return []
+        results = []
+        try:
+            posts = fb.get_posts(account=page_name, pages=pages)
+            for post in posts:
+                p = self._extract_post(post)
+                if p:
+                    results.append(p)
+        except Exception:
+            pass
+        return results
+
+    def get_post_data(self, url):
+        if not self._authenticated:
+            return None
+        try:
+            posts = list(fb.get_posts(post_urls=[url], pages=1))
+            if posts:
+                return self._extract_post(posts[0])
+        except Exception:
+            pass
+        return None
+
+    def _extract_post(self, post):
+        if not post:
+            return None
+        text = post.get("text") or ""
+        post_id = str(post.get("post_id", ""))
+        url = post.get("post_url") or post.get("url", "")
+        likes = int(post.get("likes", 0) or 0)
+        comments = int(post.get("comments", 0) or 0)
+        shares = int(post.get("shares", 0) or 0)
+        reactions = post.get("reactions", {})
+        time = post.get("time")
+        posted_at = None
+        if time:
+            try:
+                from datetime import datetime
+                posted_at = datetime.fromtimestamp(time).isoformat()
             except Exception:
                 pass
 
-        if not results:
-            results = self._search_via_ddg(keyword, date_from_dt, date_to_dt, max_posts)
+        return {
+            "post_id": post_id,
+            "platform": "facebook",
+            "url": url,
+            "caption": text[:2000],
+            "image_url": post.get("image") or post.get("image_url"),
+            "posted_at": posted_at,
+            "is_poll": is_poll_post(text),
+            "likes": likes,
+            "comments_count": comments,
+            "shares": shares,
+            "reactions": reactions,
+            "poll_results": {},
+            "source": "facebook_scraper",
+        }
 
-        return results
-
-    def _search_via_ddg(self, keyword, date_from_dt, date_to_dt, max_posts):
-        results = []
-        query = f"{keyword} site:facebook.com encuesta votacion"
-        try:
-            with DDGS() as ddgs:
-                search_results = list(ddgs.text(query, max_results=max_posts))
-        except Exception:
-            return results
-
-        for r in search_results:
-            url = r.get("href", "")
-            if not url or "facebook.com" not in url:
-                continue
-
-            title = r.get("title", "") or ""
-            body = r.get("body", "") or ""
-
-            results.append({
-                "post_id": url[:200],
-                "url": url,
-                "caption": f"{title}\n{body}"[:2000],
-                "image_url": None,
-                "posted_at": None,
-                "is_poll": is_poll_post(title + " " + body),
-                "likes": 0,
-                "comments_count": 0,
-                "shares": 0,
-                "reactions": {},
-            })
-
-        return results
-
-    def download_post_image(self, url):
-        if not url:
-            return None
-        self._rate_limit_wait()
-        tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
-        try:
-            self._download_image(url, tmp.name)
-            return tmp.name
-        except Exception:
-            if os.path.exists(tmp.name):
-                os.unlink(tmp.name)
-            return None
+    def get_known_political_pages(self):
+        return [
+            "A24com", "TNnoticias", "lanacion", "clarincom",
+            "infobae", "pagina12", "cronica", "ambito",
+            "perfil", "elcronistadiario",
+        ]
