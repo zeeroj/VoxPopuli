@@ -182,6 +182,21 @@ def save_and_analyze(search_id, all_posts, face_matcher, ws, progress_callback=N
 
         caption = post.get("caption", "") or ""
         caption_lower = caption.lower()
+
+        likes = post.get("likes", 0)
+        comments = post.get("comments_count", 0)
+        shares = post.get("shares", 0)
+        if likes:
+            try:
+                db.execute("INSERT OR IGNORE INTO reactions (post_id, reaction_type, count) VALUES (?, ?, ?)",
+                           (post_db_id, 'like', int(likes)))
+            except: pass
+        if comments:
+            try:
+                db.execute("INSERT OR IGNORE INTO reactions (post_id, reaction_type, count) VALUES (?, ?, ?)",
+                           (post_db_id, 'comments', int(comments)))
+            except: pass
+
         for candidate_key, info in CANDIDATES.items():
             terms_to_check = list(info.get("search_terms", []))
             terms_to_check.append(info["name"])
@@ -461,36 +476,83 @@ def main():
                 st.plotly_chart(fig3, use_container_width=True)
 
         st.divider()
-        st.header("🗳️ Quien GANA en las Encuestas")
-        
+        st.header("🗳️ Encuestas: Quien GANA y Por Que")
+
         poll_wins = result.get("poll_wins", {})
+        poll_pcts = result.get("poll_percentages", [])
+
         if poll_wins:
-            win_cols = st.columns(min(len(poll_wins), 4))
-            for i, (name, data) in enumerate(sorted(poll_wins.items(), key=lambda x: -x[1]["wins"])):
+            win_sorted = sorted(poll_wins.items(), key=lambda x: -x[1]["wins"])
+            top_winner = win_sorted[0][0]
+            win_cols = st.columns(min(len(win_sorted), 4))
+            for i, (name, data) in enumerate(win_sorted):
                 with win_cols[i % len(win_cols)]:
                     st.metric(
-                        f"{name}",
-                        f"{data['wins']} encuestas",
-                        delta=f"de {data['total_polls']} en las que aparece",
+                        f"🏆 {name}",
+                        f"Gana en {data['wins']}",
+                        delta=f"de {data['total_polls']} encuestas",
                     )
-        else:
-            st.caption("No se encontraron porcentajes para determinar ganadores.")
 
-        st.subheader("📋 Detalle de cada encuesta")
-        poll_pcts = result.get("poll_percentages", [])
+            st.markdown(f"---")
+            st.markdown(f"### {top_winner} lidera en {win_sorted[0][1]['wins']}/{win_sorted[0][1]['total_polls']} encuestas detectadas con porcentajes")
+
         if poll_pcts:
-            for pp in poll_pcts[:20]:
+            st.subheader("📋 Detalle completo de cada encuesta (URL + datos + interpretacion)")
+            for i, pp in enumerate(poll_pcts[:30]):
                 pcts = pp.get("percentages", {})
                 pcts_sorted = sorted(pcts.items(), key=lambda x: -x[1])
-                pcts_str = "  |  ".join(f"**{n}**: {v}%" for n, v in pcts_sorted)
                 winner = pp.get("winner", "?")
-                
-                expander_label = f"{'🏆' if winner in pcts else '📊'} {winner} lidera — {pp.get('caption', '')[:100]}"
-                with st.expander(expander_label):
-                    st.markdown(pcts_str)
-                    st.caption(f"[{pp.get('url', '')[:100]}]({pp.get('url', '')})")
+                winner_pct = pp.get("winner_pct", 0)
+
+                pcts_lines = ""
+                for name, pct in pcts_sorted:
+                    mark = " 👈 GANA" if name == winner else ""
+                    pcts_lines += f"- **{name}**: {pct}%{mark}\n"
+
+                with st.expander(f"{'🥇' if winner == top_winner else '📊'} {winner}: {winner_pct}% — {pp.get('caption', '')[:80]}"):
+                    st.markdown(pcts_lines)
+                    if len(pcts_sorted) >= 2:
+                        diff = pcts_sorted[0][1] - pcts_sorted[1][1]
+                        st.caption(f"🔍 Interpretacion: {winner} supera a {pcts_sorted[1][0]} por **+{diff:.1f} puntos** en esta encuesta.")
+                    st.caption(f"📎 Fuente: [{pp.get('url', '')[:120]}]({pp.get('url', '')})")
         else:
-            st.caption("No se detectaron porcentajes en los textos. Probá keywords mas especificas como 'milei encuesta 2027 porcentaje'.")
+            st.warning("⚠️ No se detectaron porcentajes en los textos. Tips:\n"
+                       "- Usa keywords como: `milei kicillof encuesta presidencial 2027 porcentaje`\n"
+                       "- Amplia el rango de fechas al ultimo mes\n"
+                       "- Prueba con nombres completos: `javier milei axel kicillof encuesta`")
+
+        st.divider()
+        st.subheader("📎 TODOS los posts encontrados (URLs verificables)")
+        all_posts_urls = result.get("all_posts_sample", [])
+        if not all_posts_urls:
+            if st.button("🔄 Cargar lista completa de URLs"):
+                db2 = get_db()
+                posts_rows = db2.execute(
+                    "SELECT p.url, p.platform, p.caption, p.is_poll, pc.candidate_key, c.name "
+                    "FROM posts p "
+                    "LEFT JOIN post_candidates pc ON p.id = pc.post_id "
+                    "LEFT JOIN candidates c ON pc.candidate_key = c.key "
+                    "WHERE p.search_id = ? ORDER BY p.is_poll DESC, p.posted_at DESC LIMIT 200",
+                    (result.get("search_id"),)
+                ).fetchall()
+                if posts_rows:
+                    url_data = []
+                    for pr in posts_rows:
+                        url_data.append({
+                            "Plataforma": pr["platform"],
+                            "Candidato": pr["name"] or "—",
+                            "Encuesta": "Sí" if pr["is_poll"] else "No",
+                            "Titulo": (pr["caption"] or "")[:100],
+                            "URL": pr["url"],
+                        })
+                    st.dataframe(
+                        pd.DataFrame(url_data),
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={"URL": st.column_config.LinkColumn("URL")}
+                    )
+        else:
+            st.dataframe(pd.DataFrame(all_posts_urls), use_container_width=True, hide_index=True)
 
         st.divider()
         st.header("🧠 Conclusion")
