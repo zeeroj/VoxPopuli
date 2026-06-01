@@ -5,7 +5,7 @@ import random
 from datetime import datetime
 from .base import BaseScraper
 from utils.helpers import parse_date, is_poll_post, safe_get
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 import requests
 
 try:
