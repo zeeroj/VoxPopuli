@@ -9,7 +9,7 @@ from config import CANDIDATES, PLATFORMS
 from database.db import init_db, get_db
 from scraper.web_searcher import WebSearcher
 from scraper.facebook_scraper import FacebookScraper
-from scraper.post_fetcher import fetch_reddit_data, fetch_reddit_comments, analyze_comments_for_candidates
+import scraper.post_fetcher as pf
 from analyzer.aggregator import Aggregator
 from utils.helpers import is_poll_post
 
@@ -182,7 +182,7 @@ if st.session_state.get("trigger_search"):
             progress_bar.progress(0.8, text=f"Scrapeando Reddit {reddit_count+1}...")
             try:
                 url = post.get("url")
-                rd = fetch_reddit_data(url)
+                rd = pf.fetch_reddit_data(url)
                 if rd:
                     pr = db.execute("SELECT id FROM posts WHERE platform='reddit' AND post_id=?",
                                     (str(post.get("post_id", ""))[:200])).fetchone()
@@ -199,9 +199,9 @@ if st.session_state.get("trigger_search"):
                         if rd.get("posted_at"):
                             db.execute("UPDATE posts SET posted_at=? WHERE id=?", (rd["posted_at"], pid))
 
-                        comments = fetch_reddit_comments(url)
+                        comments = pf.fetch_reddit_comments(url)
                         if comments:
-                            analysis = analyze_comments_for_candidates(comments, CANDIDATES)
+                            analysis = pf.analyze_comments_for_candidates(comments, CANDIDATES)
                             if analysis:
                                 db.execute("UPDATE posts SET poll_reactions=? WHERE id=?",
                                            (json.dumps({"reddit_comments": analysis}), pid))
