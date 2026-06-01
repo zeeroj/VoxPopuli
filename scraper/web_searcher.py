@@ -23,23 +23,40 @@ SOCIAL_PLATFORMS = {
     "t.me": "telegram",
 }
 
-SEARCH_STRATEGIES = [
-    '"{keyword}" encuesta presidencial 2027 porcentaje',
-    '"{keyword}" intencion voto 2027',
-    '"{keyword}" vs encuesta balotaje',
-    '"{keyword}" sondeo elecciones argentina',
-    '"{keyword}" encuesta quien gana',
-    '"{keyword}" instagram facebook encuesta reacciones',
-    '"{keyword}" reddit encuesta votacion',
-    '"{keyword}" tiktok encuesta tendencia',
-    '"{keyword}" twitter encuesta presidencial',
-    '"{keyword}" youtube encuesta elecciones',
-    '"{keyword}" encuesta gana pierde 2027',
-    '"{keyword}" encuesta votacion likes comentarios',
-    '"{keyword}" medicion encuesta presidencial',
-    '"{keyword}" rechazo aprobacion encuesta 2027',
-    '"{keyword}" scaneo intencion voto argentina',
-]
+
+def generate_keyword_combinations():
+    combos = set()
+    poll_terms = [
+        "encuesta presidencial 2027", "encuesta electoral argentina",
+        "intencion voto 2027", "sondeo presidencial",
+        "encuesta quien gana", "encuesta votacion",
+        "preferencia electoral", "medicion presidencial",
+        "encuesta reeleccion", "votacion 2027 presidente",
+        "encuesta approval rating", "imagen positiva negativa",
+        "balotaje encuesta", "encuesta vs",
+        "presidential poll argentina 2027",
+        "elecciones 2027 candidato",
+        "scaneo electoral", "rechazo aprobacion",
+    ]
+    platform_terms = ["instagram", "facebook", "twitter", "reddit", "tiktok", "youtube"]
+
+    for ck, info in CANDIDATES.items():
+        name = info["name"]
+        for pt in poll_terms:
+            combos.add(f'"{name}" {pt}')
+            combos.add(f'{name} {pt}')
+        for ft in platform_terms:
+            combos.add(f'{name} {ft}')
+        for ck2, info2 in CANDIDATES.items():
+            if ck >= ck2:
+                continue
+            combos.add(f'{info["name"]} vs {info2["name"]} encuesta')
+            combos.add(f'"{info["name"]}" "{info2["name"]}" encuesta')
+
+    combos.add("presidente argentino 2027 encuesta")
+    combos.add("proximo presidente argentina 2027")
+    combos.add("elecciones argentinas 2027 sondeo")
+    return [c[:300] for c in combos]
 
 
 def detect_platform(url):
@@ -87,7 +104,6 @@ def extract_poll_percentages(text):
 
     pct_pattern = r'(\d{1,3})[.,](\d{1,2})?\s*%'
     pct_matches = list(re.finditer(pct_pattern, text_lower))
-
     assigned_pcts = set()
     results = {}
     for ck, names in candidate_names.items():
@@ -113,7 +129,6 @@ def extract_poll_percentages(text):
         if best_pct is not None and best_match_idx is not None:
             results[ck] = best_pct
             assigned_pcts.add(best_match_idx)
-
     return results
 
 
@@ -123,56 +138,52 @@ def extract_engagement_from_text(text):
     likes = 0
     comments = 0
     shares = 0
-    text_lower = text.lower()
+    t = text.lower()
 
-    like_patterns = [
-        r'(\d+[.,]?\d*)\s*[kK]\s*(?:like|me\s*gusta|reacciones?)',
-        r'(\d+[.,]?\d*)\s*[mM]\s*(?:like|me\s*gusta|reacciones?)',
-        r'(?:like|me\s*gusta|reacciones?)[:\s]*(\d+[.,]?\d*)\s*[kKmM]?',
-        r'(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d+)?)\s*(?:like|me\s*gusta)s?',
+    lp = [
+        (r'(\d+[.,]?\d*)\s*[kKmM]?\s*(?:like|me\s*gusta|reacciones?|votos?)', 0),
+        (r'(?:like|me\s*gusta|reacciones?|votos?)[:\s]*(\d+[.,]?\d*)\s*[kKmM]?', 0),
+        (r'(\d{1,3}(?:[.,]\d{3})*\s*(?:like|me\s*gusta)s?)', 0),
     ]
-    for pat in like_patterns:
-        m = re.search(pat, text_lower)
+    for pat, _ in lp:
+        m = re.search(pat, t)
         if m:
-            likes = _parse_social_count(m.group(1))
+            likes = _pc(m.group(1))
             break
 
-    comment_patterns = [
-        r'(\d+[.,]?\d*)\s*[kK]\s*(?:comentario|comment)',
-        r'(\d+[.,]?\d*)\s*[mM]\s*(?:comentario|comment)',
-        r'(?:comentario|comment)s?[:\s]*(\d+[.,]?\d*)\s*[kKmM]?',
-        r'(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d+)?)\s*(?:comentario|comment)s?',
+    cp = [
+        (r'(\d+[.,]?\d*)\s*[kKmM]?\s*(?:comentarios?|comments?|opiniones?)', 0),
+        (r'(?:comentarios?|comments?)[:\s]*(\d+[.,]?\d*)\s*[kKmM]?', 0),
     ]
-    for pat in comment_patterns:
-        m = re.search(pat, text_lower)
+    for pat, _ in cp:
+        m = re.search(pat, t)
         if m:
-            comments = _parse_social_count(m.group(1))
+            comments = _pc(m.group(1))
             break
 
-    share_patterns = [
-        r'(\d+[.,]?\d*)\s*[kK]\s*(?:compart|share|retweet|repost)',
-        r'(?:compart|share|retweet|repost)s?[:\s]*(\d+[.,]?\d*)\s*[kKmM]?',
+    sp = [
+        (r'(\d+[.,]?\d*)\s*[kKmM]?\s*(?:compartidos?|shares?|retweets?)', 0),
+        (r'(?:compartidos?|shares?)[:\s]*(\d+[.,]?\d*)\s*[kKmM]?', 0),
     ]
-    for pat in share_patterns:
-        m = re.search(pat, text_lower)
+    for pat, _ in sp:
+        m = re.search(pat, t)
         if m:
-            shares = _parse_social_count(m.group(1))
+            shares = _pc(m.group(1))
             break
 
     return likes, comments, shares
 
 
-def _parse_social_count(text):
+def _pc(text):
     if not text:
         return 0
-    text = str(text).replace(',', '').replace(' ', '').upper()
+    s = str(text).replace(',', '').replace(' ', '').upper()
     try:
-        if 'K' in text:
-            return int(float(text.replace('K', '')) * 1000)
-        elif 'M' in text:
-            return int(float(text.replace('M', '')) * 1_000_000)
-        else:
-            return int(float(text))
+        if 'K' in s:
+            return int(float(s.replace('K', '')) * 1000)
+        if 'M' in s:
+            return int(float(s.replace('M', '')) * 1_000_000)
+        return int(float(s))
     except (ValueError, TypeError):
         return 0
 
@@ -181,87 +192,84 @@ class WebSearcher:
     def __init__(self):
         self._last_request = 0
         self._ddgs = DDGS()
+        self._keyword_combos = list(generate_keyword_combinations())
 
-    def _rate_limit(self, min_seconds=1.0):
-        elapsed = time.time() - self._last_request
-        if elapsed < min_seconds:
-            time.sleep(min_seconds - elapsed + random.uniform(0.1, 0.6))
+    def _rl(self, ms=0.8):
+        e = time.time() - self._last_request
+        if e < ms:
+            time.sleep(ms - e + random.uniform(0.05, 0.3))
         self._last_request = time.time()
 
-    def search_all_platforms(self, keyword, max_per_platform=25):
-        all_results = []
-        seen_urls = set()
+    def search_all_platforms(self, max_per_query=6, max_total=2000):
+        results = []
+        seen = set()
+        combos = list(self._keyword_combos)
+        random.shuffle(combos)
 
-        for strategy in SEARCH_STRATEGIES:
-            query = strategy.format(keyword=keyword)[:300]
-            self._rate_limit()
-
+        for q in combos:
+            if len(results) >= max_total:
+                break
+            self._rl()
             try:
-                search_results = list(self._ddgs.text(query, max_results=max_per_platform))
+                sr = list(self._ddgs.text(q, max_results=max_per_query))
             except Exception:
                 continue
 
-            for r in search_results:
+            for r in sr:
+                if len(results) >= max_total:
+                    break
                 url = r.get("href", "")
-                if not url or url in seen_urls:
+                if not url or url in seen:
                     continue
-                seen_urls.add(url)
-
-                platform = detect_platform(url)
-                post_id = extract_post_id(url, platform)
-
+                seen.add(url)
+                plat = detect_platform(url)
+                pid = extract_post_id(url, plat)
                 title = r.get("title", "") or ""
                 body = r.get("body", "") or ""
                 caption = f"{title}\n{body}"[:2000]
-
                 likes, comments, shares = extract_engagement_from_text(body)
+                pp = extract_poll_percentages(title + " " + body)
 
-                results_entry = {
-                    "post_id": str(post_id),
-                    "platform": platform or "web",
+                results.append({
+                    "post_id": str(pid),
+                    "platform": plat or "web",
                     "url": url,
                     "caption": caption,
                     "image_url": None,
                     "posted_at": None,
-                    "is_poll": False,
+                    "is_poll": bool(pp),
                     "likes": likes,
                     "comments_count": comments,
                     "shares": shares,
-                    "reactions": {"like": likes, "comments": comments} if likes or comments else {},
-                    "poll_results": extract_poll_percentages(title + " " + body),
+                    "reactions": {},
+                    "poll_results": pp,
                     "source": "web_search",
-                    "keyword": keyword,
-                }
-
-                all_results.append(results_entry)
-
-        return all_results
+                })
+        return results
 
     def enrich_post(self, post):
         from scraper.post_fetcher import fetch_reddit_data, fetch_page_meta
-        platform = post.get("platform")
+        plat = post.get("platform")
         url = post.get("url")
 
-        if platform == "reddit" and url:
-            data = fetch_reddit_data(url)
-            if data:
-                post["likes"] = data.get("likes", 0)
-                post["comments_count"] = data.get("comments_count", 0)
-                post["reactions"] = {"upvotes": data.get("likes", 0), "comments": data.get("comments_count", 0)}
-                if data.get("posted_at"):
-                    post["posted_at"] = data["posted_at"]
-                if data.get("image_url") and not post.get("image_url"):
-                    post["image_url"] = data["image_url"]
-                if data.get("caption"):
-                    post["caption"] = data["caption"][:2000]
+        if plat == "reddit" and url:
+            d = fetch_reddit_data(url)
+            if d:
+                post["likes"] = d.get("likes", 0)
+                post["comments_count"] = d.get("comments_count", 0)
+                if d.get("posted_at"):
+                    post["posted_at"] = d["posted_at"]
+                if d.get("image_url") and not post.get("image_url"):
+                    post["image_url"] = d["image_url"]
+                if d.get("caption"):
+                    post["caption"] = d["caption"][:2000]
 
-        if platform in ("facebook", "instagram", "twitter", "youtube", "web") and url:
-            if not post.get("posted_at") or post.get("likes", 0) == 0:
-                data = fetch_page_meta(url)
-                if data:
-                    if data.get("posted_at") and not post.get("posted_at"):
-                        post["posted_at"] = data["posted_at"]
-                    if data.get("image_url") and not post.get("image_url"):
-                        post["image_url"] = data["image_url"]
-
+        if plat in ("facebook", "instagram", "twitter", "youtube", "web") and url:
+            if not post.get("posted_at"):
+                d = fetch_page_meta(url)
+                if d:
+                    if d.get("posted_at"):
+                        post["posted_at"] = d["posted_at"]
+                    if d.get("image_url") and not post.get("image_url"):
+                        post["image_url"] = d["image_url"]
         return post

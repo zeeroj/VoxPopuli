@@ -11,250 +11,228 @@ class Aggregator:
 
     def get_search_results(self, search_id):
         query = """
-            SELECT
-                p.id, p.platform, p.post_id, p.url, p.caption,
-                p.image_url, p.posted_at, p.scraped_at, p.is_poll,
-                p.poll_data,
-                pc.candidate_key, pc.confidence, pc.detection_method,
-                c.name as candidate_name, c.party as candidate_party,
-                c.color as candidate_color
+            SELECT p.id, p.platform, p.post_id, p.url, p.caption,
+                   p.image_url, p.posted_at, p.scraped_at, p.is_poll,
+                   p.poll_data,
+                   pc.candidate_key, pc.confidence, pc.detection_method,
+                   c.name as candidate_name, c.party as candidate_party,
+                   c.color as candidate_color
             FROM posts p
             LEFT JOIN post_candidates pc ON p.id = pc.post_id
             LEFT JOIN candidates c ON pc.candidate_key = c.key
             WHERE p.search_id = ?
-            ORDER BY p.posted_at DESC
+            ORDER BY p.is_poll DESC, p.posted_at DESC
         """
         df = pd.read_sql_query(query, self.db, params=(search_id,))
 
         if df.empty:
-            return self._empty_summary()
+            return self._empty()
 
-        df["posted_at"] = pd.to_datetime(df["posted_at"], errors="coerce")
-        df["scraped_at"] = pd.to_datetime(df["scraped_at"], errors="coerce")
-
-        return self._build_summary(df, search_id)
-
-    def _build_summary(self, df, search_id):
         reactions_df = pd.read_sql_query(
             "SELECT post_id, reaction_type, count FROM reactions",
             self.db,
         )
+        df["posted_at"] = pd.to_datetime(df["posted_at"], errors="coerce")
+        df["scraped_at"] = pd.to_datetime(df["scraped_at"], errors="coerce")
 
-        candidate_metrics = []
-        for candidate_key, info in CANDIDATES.items():
-            candidate_posts = df[df["candidate_key"] == candidate_key]
+        poll_rows = df[df["is_poll"] == 1].copy()
+        all_posts_list = self._build_post_list(df, reactions_df)
+        poll_details = self._analyze_polls(poll_rows, reactions_df)
+        rankings = self._rank_candidates(df, reactions_df)
 
-            post_ids = candidate_posts["id"].tolist()
-            candidate_reactions = (
-                reactions_df[reactions_df["post_id"].isin(post_ids)]
-                if not reactions_df.empty
-                else pd.DataFrame()
-            )
-
-            total_posts = len(candidate_posts)
-            poll_posts = len(candidate_posts[candidate_posts["is_poll"] == 1])
-            total_reactions = (
-                int(candidate_reactions["count"].sum())
-                if not candidate_reactions.empty
-                else 0
-            )
-            avg_confidence = (
-                round(candidate_posts["confidence"].mean(), 3)
-                if total_posts > 0
-                else 0.0
-            )
-
-            fb_posts = len(candidate_posts[candidate_posts["platform"] == "facebook"])
-            ig_posts = len(candidate_posts[candidate_posts["platform"] == "instagram"])
-
-            candidate_metrics.append({
-                "candidate_key": candidate_key,
-                "candidate_name": info["name"],
-                "party": info["party"],
-                "color": info["color"],
-                "total_posts": total_posts,
-                "poll_posts": poll_posts,
-                "total_reactions": total_reactions,
-                "avg_confidence": avg_confidence,
-                "facebook_posts": fb_posts,
-                "instagram_posts": ig_posts,
-            })
-
-        metrics_df = pd.DataFrame(candidate_metrics)
-        metrics_df["engagement_score"] = (
-            metrics_df["total_reactions"] * 0.5
-            + metrics_df["poll_posts"] * 10
-            + metrics_df["total_posts"] * 2
-        )
-
-        if not metrics_df.empty and metrics_df["engagement_score"].max() > 0:
-            max_score = metrics_df["engagement_score"].max()
-            metrics_df["normalized_score"] = (
-                metrics_df["engagement_score"] / max_score * 100
-            ).round(1)
-        else:
-            metrics_df["normalized_score"] = 0.0
-
-        metrics_df = metrics_df.sort_values("normalized_score", ascending=False)
-
-        platform_breakdown = (
-            df.groupby("platform")
-            .agg(
-                total_posts=("id", "count"),
-                poll_posts=("is_poll", "sum"),
-                unique_candidates=("candidate_key", "nunique"),
-            )
-            .reset_index()
-        )
-
-        timeline = self._build_timeline(df)
-
-        top_candidate = (
-            metrics_df.iloc[0]["candidate_name"]
-            if not metrics_df.empty
-            else "Sin datos"
-        )
-        top_score = (
-            metrics_df.iloc[0]["normalized_score"]
-            if not metrics_df.empty
-            else 0.0
-        )
-
-        posts_with_dates = int(df["posted_at"].notna().sum())
-        poll_percentages, poll_wins = self._extract_poll_percentages(df)
+        top = rankings[0]["candidate_name"] if rankings else "Sin datos"
 
         return {
             "search_id": search_id,
-            "total_posts_scraped": len(df),
-            "total_poll_posts": int(df["is_poll"].sum()),
-            "candidates_found": int(df["candidate_key"].nunique()),
-            "posts_with_real_dates": posts_with_dates,
-            "poll_percentages": poll_percentages,
-            "poll_wins": poll_wins,
-            "platform_breakdown": platform_breakdown.to_dict("records"),
-            "candidate_rankings": metrics_df.to_dict("records"),
-            "timeline": timeline,
-            "top_candidate": top_candidate,
-            "top_score": top_score,
-            "conclusion": self._generate_conclusion(metrics_df),
+            "total_posts": len(df["id"].unique()),
+            "total_poll_posts": int(poll_rows["id"].nunique()) if not poll_rows.empty else 0,
+            "candidates_found": len(rankings),
+            "all_posts": all_posts_list,
+            "poll_details": poll_details,
+            "poll_wins": self._summarize_wins(poll_details),
+            "top_candidate": top,
+            "conclusion": self._conclusion(rankings, poll_details),
         }
 
-    def _build_timeline(self, df):
-        if df.empty:
-            return []
-        valid_dates = df["posted_at"].dropna()
-        if valid_dates.empty:
-            return []
-        df["date"] = valid_dates.dt.date
-        df = df.dropna(subset=["date"])
-        timeline = (
-            df.groupby(["date", "candidate_key"])
-            .size()
-            .reset_index(name="count")
-        )
-        timeline["candidate_name"] = timeline["candidate_key"].apply(
-            lambda k: CANDIDATES.get(k, {}).get("name", k) if k else "Desconocido"
-        )
-        timeline["date"] = timeline["date"].astype(str)
-        return timeline.sort_values("date").to_dict("records")
+    def _build_post_list(self, df, reactions_df):
+        posts = []
+        seen = set()
+        for _, row in df.iterrows():
+            pid = row["id"]
+            if pid in seen:
+                continue
+            seen.add(pid)
+            likes = 0
+            comments = 0
+            if not reactions_df.empty:
+                rr = reactions_df[reactions_df["post_id"] == pid]
+                likes = int(rr[rr["reaction_type"] == "like"]["count"].sum()) if not rr.empty else 0
+                comments = int(rr[rr["reaction_type"] == "comments"]["count"].sum()) if not rr.empty else 0
+            poll_data = row.get("poll_data")
+            pcts = {}
+            if poll_data and not pd.isna(poll_data):
+                try:
+                    pcts = json.loads(poll_data) if isinstance(poll_data, str) else poll_data
+                except Exception:
+                    pcts = {}
+            winner = None
+            margin = 0
+            if pcts:
+                sorted_p = sorted(pcts.items(), key=lambda x: -x[1])
+                if sorted_p:
+                    best_ck = sorted_p[0][0]
+                    winner = CANDIDATES.get(best_ck, {}).get("name", best_ck)
+                    if len(sorted_p) > 1:
+                        margin = round(sorted_p[0][1] - sorted_p[1][1], 1)
 
-    def _extract_poll_percentages(self, df):
-        poll_rows = df[df["is_poll"] == 1]
-        if poll_rows.empty:
-            return [], {}
+            caption = str(row.get("caption", "") or "")
+            posts.append({
+                "id": pid,
+                "url": str(row.get("url", "")),
+                "platform": str(row.get("platform", "web")),
+                "caption": caption[:150],
+                "poll_results": pcts,
+                "winner": winner,
+                "margin": margin,
+                "likes": likes,
+                "comments": comments,
+                "is_poll": bool(row.get("is_poll", 0)),
+                "candidate_name": row.get("candidate_name"),
+                "posted_at": str(row.get("posted_at", ""))[:10],
+            })
+        return posts
 
-        poll_results_list = []
-        candidate_win_counts = {}
-        candidate_total_polls = {}
-
+    def _analyze_polls(self, poll_rows, reactions_df):
+        details = []
+        seen = set()
         for _, row in poll_rows.iterrows():
+            pid = row["id"]
+            if pid in seen:
+                continue
+            seen.add(pid)
             poll_data = row.get("poll_data")
             if not poll_data or pd.isna(poll_data):
                 continue
             try:
-                data = json.loads(poll_data) if isinstance(poll_data, str) else poll_data
-            except (json.JSONDecodeError, TypeError):
+                pcts = json.loads(poll_data) if isinstance(poll_data, str) else poll_data
+            except Exception:
                 continue
-            if not data:
+            if not pcts:
                 continue
+
+            sorted_items = sorted(pcts.items(), key=lambda x: -x[1])
+            best_ck = sorted_items[0][0]
+            winner = CANDIDATES.get(best_ck, {}).get("name", best_ck)
+            winner_pct = sorted_items[0][1]
+            margin = round(winner_pct - sorted_items[1][1], 1) if len(sorted_items) > 1 else 0
+
+            likes = 0
+            comments = 0
+            if not reactions_df.empty:
+                rr = reactions_df[reactions_df["post_id"] == pid]
+                likes = int(rr[rr["reaction_type"] == "like"]["count"].sum()) if not rr.empty else 0
+                comments = int(rr[rr["reaction_type"] == "comments"]["count"].sum()) if not rr.empty else 0
 
             pct_display = {}
-            winner_key = None
-            winner_pct = 0
-            for ck, pct in data.items():
-                candidate_name = CANDIDATES.get(ck, {}).get("name", ck)
-                pct_display[candidate_name] = pct
-                if pct > winner_pct:
-                    winner_pct = pct
-                    winner_key = ck
+            for ck, pct in pcts.items():
+                pct_display[CANDIDATES.get(ck, {}).get("name", ck)] = pct
 
-            poll_result = {
-                "url": str(row.get("url", ""))[:200],
-                "caption": (str(row.get("caption", "")) or "")[:200],
+            details.append({
+                "url": str(row.get("url", "")),
+                "caption": str(row.get("caption", ""))[:200],
                 "percentages": pct_display,
-                "winner": CANDIDATES.get(winner_key, {}).get("name", "?") if winner_key else "?",
-                "winner_key": winner_key,
+                "winner": winner,
                 "winner_pct": winner_pct,
-            }
-            poll_results_list.append(poll_result)
+                "margin": margin,
+                "likes": likes,
+                "comments": comments,
+            })
+        return details
 
-            if winner_key:
-                candidate_win_counts[winner_key] = candidate_win_counts.get(winner_key, 0) + 1
+    def _summarize_wins(self, poll_details):
+        wins = {}
+        total_per_candidate = {}
+        for pd_ in poll_details:
+            w = pd_.get("winner")
+            if not w:
+                continue
+            total_per_candidate[w] = total_per_candidate.get(w, 0) + 1
+        for pd_ in poll_details:
+            w = pd_.get("winner")
+            if not w:
+                continue
+            wins.setdefault(w, {"wins": 0, "total_polls": total_per_candidate.get(w, 0), "margins": []})
+            wins[w]["wins"] += 1
+            wins[w]["margins"].append(pd_.get("margin", 0))
+        for w in wins:
+            ms = wins[w]["margins"]
+            wins[w]["avg_margin"] = round(sum(ms) / len(ms), 1) if ms else 0.0
+            del wins[w]["margins"]
+        return wins
 
-            for ck in data.keys():
-                candidate_total_polls[ck] = candidate_total_polls.get(ck, 0) + 1
+    def _rank_candidates(self, df, reactions_df):
+        rankings = []
+        for ck, info in CANDIDATES.items():
+            cp = df[df["candidate_key"] == ck]
+            total = len(cp["id"].unique())
+            if total == 0:
+                continue
+            poll_ct = int(cp[cp["is_poll"] == 1]["id"].nunique())
+            pids = cp["id"].unique().tolist()
+            total_react = 0
+            if not reactions_df.empty:
+                total_react = int(reactions_df[reactions_df["post_id"].isin(pids)]["count"].sum())
+            total_likes = 0
+            if not reactions_df.empty:
+                total_likes = int(reactions_df[(reactions_df["post_id"].isin(pids)) & (reactions_df["reaction_type"] == "like")]["count"].sum())
+            rankings.append({
+                "candidate_name": info["name"],
+                "party": info["party"],
+                "color": info["color"],
+                "total_posts": total,
+                "poll_posts": poll_ct,
+                "total_likes": total_likes,
+            })
+        rankings.sort(key=lambda x: -x["total_posts"])
+        max_score = max(r["total_posts"] for r in rankings) if rankings else 1
+        for r in rankings:
+            r["score"] = round(r["total_posts"] / max_score * 100, 1)
+        return rankings
 
-        win_summary = {}
-        for ck in CANDIDATES:
-            wins = candidate_win_counts.get(ck, 0)
-            total = candidate_total_polls.get(ck, 0)
-            if wins > 0:
-                win_summary[CANDIDATES[ck]["name"]] = {
-                    "wins": wins,
-                    "total_polls": total,
-                    "color": CANDIDATES[ck]["color"],
-                }
+    def _conclusion(self, rankings, poll_details):
+        if not rankings and not poll_details:
+            return "No se encontraron datos."
 
-        return poll_results_list, win_summary
+        lines = []
+        total = sum(r["total_posts"] for r in rankings)
+        lines.append(f"Analisis basado en {total} posts recolectados.\n")
 
-    def _generate_conclusion(self, metrics_df):
-        if metrics_df.empty:
-            return "No se encontraron datos suficientes para sacar una conclusión."
+        if poll_details:
+            wins = self._summarize_wins(poll_details)
+            lines.append("**Resultados de encuestas con porcentajes:**\n")
+            for name, data in sorted(wins.items(), key=lambda x: -x[1]["wins"]):
+                lines.append(
+                    f"- **{name}**: gana en {data['wins']}/{data['total_polls']} "
+                    f"encuestas ({round(data['wins']/data['total_polls']*100)}%) "
+                    f"| margen promedio +{data['avg_margin']} puntos\n"
+                )
 
-        top3 = metrics_df.head(3).to_dict("records")
-        total_posts = metrics_df["total_posts"].sum()
+        lines.append("\n**Presencia en plataformas:**\n")
+        for r in rankings[:5]:
+            lines.append(f"- {r['candidate_name']}: {r['total_posts']} posts, {r['poll_posts']} encuestas, {r['total_likes']} likes\n")
 
-        conclusion_parts = []
-        conclusion_parts.append(f"Análisis basado en {int(total_posts)} posts recolectados.\n\n")
+        lines.append("\n*Datos extraidos de fuentes publicas. Cada porcentaje y reaccion tiene URL verificable.*")
+        return "".join(lines)
 
-        conclusion_parts.append("**Candidatos con más presencia en redes:**\n")
-        for i, c in enumerate(top3, 1):
-            conclusion_parts.append(
-                f"{i}. **{c['candidate_name']}** ({c['party']}) — "
-                f"{c['total_posts']} posts | "
-                f"{c['poll_posts']} encuestas | "
-                f"{c['total_reactions']} reacciones\n"
-            )
-
-        conclusion_parts.append(f"\n*Los datos provienen de busquedas web publicas. "
-                                f"Para ver quien gana en cada encuesta individual, "
-                                f"revisa la seccion 'Quien GANA en las Encuestas' arriba.*")
-
-        return "".join(conclusion_parts)
-
-    def _empty_summary(self):
+    def _empty(self):
         return {
             "search_id": None,
-            "total_posts_scraped": 0,
+            "total_posts": 0,
             "total_poll_posts": 0,
             "candidates_found": 0,
-            "posts_with_real_dates": 0,
-            "poll_percentages": [],
+            "all_posts": [],
+            "poll_details": [],
             "poll_wins": {},
-            "platform_breakdown": [],
-            "candidate_rankings": [],
-            "timeline": [],
             "top_candidate": "Sin datos",
-            "top_score": 0.0,
-            "conclusion": "No se encontraron datos. Intentá con otros keywords o rango de fechas.",
+            "conclusion": "No se encontraron datos.",
         }
