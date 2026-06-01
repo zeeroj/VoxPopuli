@@ -93,7 +93,6 @@ class Aggregator:
                 "platform": str(row.get("platform", "web")),
                 "caption": (str(row.get("caption", "")) or "")[:150],
                 "poll_results": pcts,
-                "reaction_map": reaction_map,
                 "winner": winner,
                 "margin": margin,
                 "likes": likes,
