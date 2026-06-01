@@ -29,8 +29,6 @@ class Aggregator:
 
         df["posted_at"] = pd.to_datetime(df["posted_at"], errors="coerce")
         df["scraped_at"] = pd.to_datetime(df["scraped_at"], errors="coerce")
-        df["posted_at"] = df["posted_at"].fillna(df["scraped_at"])
-        df["posted_at"] = df["posted_at"].fillna(datetime.utcnow())
 
         return self._build_summary(df, search_id)
 
@@ -120,11 +118,14 @@ class Aggregator:
             else 0.0
         )
 
+        posts_with_dates = int(df["posted_at"].notna().sum())
+
         return {
             "search_id": search_id,
             "total_posts_scraped": len(df),
             "total_poll_posts": int(df["is_poll"].sum()),
             "candidates_found": int(df["candidate_key"].nunique()),
+            "posts_with_real_dates": posts_with_dates,
             "platform_breakdown": platform_breakdown.to_dict("records"),
             "candidate_rankings": metrics_df.to_dict("records"),
             "timeline": timeline,
@@ -197,8 +198,9 @@ class Aggregator:
             )
 
         conclusion_parts.append(
-            f"\n\n*Datos recolectados con web scraping. Los resultados reflejan "
-            f"tendencias en redes sociales, no una predicción electoral.*"
+            f"\n\n*Datos recolectados de fuentes publicas. "
+            f"Solo se cuentan datos observados directamente de cada URL. "
+            f"No se extrapola ni se inventa ningun dato.*"
         )
 
         return "".join(conclusion_parts)
@@ -209,6 +211,7 @@ class Aggregator:
             "total_posts_scraped": 0,
             "total_poll_posts": 0,
             "candidates_found": 0,
+            "posts_with_real_dates": 0,
             "platform_breakdown": [],
             "candidate_rankings": [],
             "timeline": [],

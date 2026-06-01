@@ -4,12 +4,14 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import os
+import json
 import time
 
 from config import CANDIDATES, PLATFORMS
 from database.db import init_db, get_db
 from scraper.web_searcher import WebSearcher
 from scraper.instagram_scraper import InstagramScraper
+from scraper.post_fetcher import fetch_post_engagement, extract_date_from_text
 from analyzer.face_matcher import FaceMatcher
 from analyzer.reaction_analyzer import calculate_engagement, is_engagement_poll
 from analyzer.aggregator import Aggregator
@@ -119,7 +121,7 @@ def run_search(keywords, date_from, date_to, progress_callback=None):
             seen.add(key)
             unique_posts.append(p)
 
-    return search_id, unique_posts
+    return search_id, unique_posts, web_searcher
 
 
 def download_image_for_post(image_url):
@@ -139,61 +141,91 @@ def download_image_for_post(image_url):
         return None
 
 
-def save_and_analyze(search_id, all_posts, face_matcher, progress_callback=None):
+def save_and_analyze(search_id, all_posts, face_matcher, ws, progress_callback=None):
     db = get_db()
     total = len(all_posts)
     platforms_found = {}
+    enriched_count = 0
+    real_date_count = 0
 
     for i, post in enumerate(all_posts):
         pct = (i + 1) / total if total > 0 else 1
         platform = post.get("platform", "web")
         platforms_found[platform] = platforms_found.get(platform, 0) + 1
 
-        if progress_callback and i % 3 == 0:
+        if progress_callback and i % 5 == 0:
             platforms_str = ", ".join(
                 f"{PLATFORM_ICONS.get(p, '')} {p}({c})"
                 for p, c in sorted(platforms_found.items(), key=lambda x: -x[1])[:4]
             )
             progress_callback(
-                f"Analizando {i+1}/{total} | {platforms_str}",
+                f"Enriqueciendo {i+1}/{total} | real={enriched_count} fechas={real_date_count} | {platforms_str}",
                 pct
             )
 
+        enriched = ws.enrich_post(post)
+        if enriched.get('likes') or enriched.get('comments_count') or enriched.get('shares'):
+            enriched_count += 1
+        if enriched.get('posted_at'):
+            real_date_count += 1
+
+        posted_at = enriched.get("posted_at") or None
+
         try:
-            posted_at = post.get("posted_at") or datetime.utcnow().isoformat()
             db.execute("""
                 INSERT OR IGNORE INTO posts
-                (search_id, platform, post_id, url, caption, image_url, posted_at, is_poll)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (search_id, platform, post_id, url, caption, image_url, posted_at, is_poll, poll_data)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
-                search_id, platform, str(post.get("post_id", ""))[:200],
-                post.get("url", ""), post.get("caption", ""),
-                post.get("image_url", None), posted_at,
-                1 if is_poll_post(post.get("caption", "")) else 0,
+                search_id, platform, str(enriched.get("post_id", ""))[:200],
+                enriched.get("url", ""), enriched.get("caption", ""),
+                enriched.get("image_url", None), posted_at,
+                1 if is_poll_post(enriched.get("caption", "")) else 0,
+                json.dumps(enriched.get("poll_results", {})) if enriched.get("poll_results") else None,
             ))
         except Exception:
             continue
 
         post_row = db.execute(
             "SELECT id FROM posts WHERE platform=? AND post_id=?",
-            (platform, str(post.get("post_id", ""))[:200])
+            (platform, str(enriched.get("post_id", ""))[:200])
         ).fetchone()
 
         if not post_row:
             continue
         post_db_id = post_row["id"]
 
-        reactions = post.get("reactions", {})
-        for rtype, rcount in reactions.items():
+        reactions = enriched.get("reactions", {})
+        if reactions:
+            for rtype, rcount in reactions.items():
+                try:
+                    db.execute(
+                        "INSERT OR IGNORE INTO reactions (post_id, reaction_type, count) VALUES (?, ?, ?)",
+                        (post_db_id, str(rtype).lower(), int(rcount or 0)),
+                    )
+                except Exception:
+                    pass
+
+        likes = enriched.get("likes", 0)
+        comments = enriched.get("comments_count", 0)
+        if likes:
             try:
                 db.execute(
                     "INSERT OR IGNORE INTO reactions (post_id, reaction_type, count) VALUES (?, ?, ?)",
-                    (post_db_id, str(rtype).lower(), int(rcount or 0)),
+                    (post_db_id, 'like', int(likes)),
+                )
+            except Exception:
+                pass
+        if comments:
+            try:
+                db.execute(
+                    "INSERT OR IGNORE INTO reactions (post_id, reaction_type, count) VALUES (?, ?, ?)",
+                    (post_db_id, 'comments', int(comments)),
                 )
             except Exception:
                 pass
 
-        image_url = post.get("image_url")
+        image_url = enriched.get("image_url")
         if image_url:
             tmp = download_image_for_post(image_url)
             if tmp:
@@ -208,7 +240,7 @@ def save_and_analyze(search_id, all_posts, face_matcher, progress_callback=None)
                         VALUES (?, ?, ?, ?)
                     """, (post_db_id, ident["candidate_key"], ident["confidence"], "face_recognition"))
 
-        caption = post.get("caption", "") or ""
+        caption = enriched.get("caption", "") or ""
         caption_lower = caption.lower()
         for candidate_key, info in CANDIDATES.items():
             terms_to_check = list(info.get("search_terms", []))
@@ -315,7 +347,7 @@ def main():
 
         with st.spinner("Buscando en todas las redes sociales..."):
             update_progress("🌐 Iniciando busqueda masiva...", 0.0)
-            search_id, all_posts = run_search(keywords, date_from, date_to, update_progress)
+            search_id, all_posts, ws = run_search(keywords, date_from, date_to, update_progress)
 
         platforms_count = {}
         for p in all_posts:
@@ -327,7 +359,7 @@ def main():
         )
         st.info(f"Se encontraron **{len(all_posts)}** resultados. {platforms_str}")
 
-        save_and_analyze(search_id, all_posts, face_matcher, update_progress)
+        save_and_analyze(search_id, all_posts, face_matcher, ws, update_progress)
 
         aggregator = Aggregator()
         result = aggregator.get_search_results(search_id)
@@ -358,6 +390,12 @@ def main():
         with col4:
             top = result.get("top_candidate", "N/A")
             st.metric("Lider", top)
+
+        real_dates = result.get("posts_with_real_dates", 0)
+        total_posts = result.get("total_posts_scraped", 0)
+        if total_posts > 0:
+            st.caption(f"🔍 {real_dates}/{total_posts} posts con fecha real observada. "
+                       f"Solo se usan datos extraidos directamente de cada URL.")
 
         st.divider()
 

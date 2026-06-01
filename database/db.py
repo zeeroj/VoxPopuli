@@ -34,6 +34,7 @@ def init_db():
             posted_at TEXT,
             scraped_at TEXT DEFAULT (datetime('now')),
             is_poll INTEGER DEFAULT 0,
+            poll_data TEXT,
             FOREIGN KEY (search_id) REFERENCES searches(id),
             UNIQUE(platform, post_id)
         );
@@ -77,5 +78,10 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_post_candidates_candidate ON post_candidates(candidate_key);
         CREATE INDEX IF NOT EXISTS idx_reactions_post ON reactions(post_id);
     """)
+    conn.commit()
+    try:
+        conn.execute("ALTER TABLE posts ADD COLUMN poll_data TEXT")
+    except Exception:
+        pass
     conn.commit()
     conn.close()
