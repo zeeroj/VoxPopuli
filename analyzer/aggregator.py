@@ -14,6 +14,7 @@ class Aggregator:
             SELECT
                 p.id, p.platform, p.post_id, p.url, p.caption,
                 p.image_url, p.posted_at, p.scraped_at, p.is_poll,
+                p.poll_data,
                 pc.candidate_key, pc.confidence, pc.detection_method,
                 c.name as candidate_name, c.party as candidate_party,
                 c.color as candidate_color
@@ -120,7 +121,7 @@ class Aggregator:
         )
 
         posts_with_dates = int(df["posted_at"].notna().sum())
-        poll_percentages = self._extract_poll_percentages(df)
+        poll_percentages, poll_wins = self._extract_poll_percentages(df)
 
         return {
             "search_id": search_id,
@@ -129,6 +130,7 @@ class Aggregator:
             "candidates_found": int(df["candidate_key"].nunique()),
             "posts_with_real_dates": posts_with_dates,
             "poll_percentages": poll_percentages,
+            "poll_wins": poll_wins,
             "platform_breakdown": platform_breakdown.to_dict("records"),
             "candidate_rankings": metrics_df.to_dict("records"),
             "timeline": timeline,
@@ -159,8 +161,12 @@ class Aggregator:
     def _extract_poll_percentages(self, df):
         poll_rows = df[df["is_poll"] == 1]
         if poll_rows.empty:
-            return []
-        results = []
+            return [], {}
+
+        poll_results_list = []
+        candidate_win_counts = {}
+        candidate_total_polls = {}
+
         for _, row in poll_rows.iterrows():
             poll_data = row.get("poll_data")
             if not poll_data or pd.isna(poll_data):
@@ -169,13 +175,47 @@ class Aggregator:
                 data = json.loads(poll_data) if isinstance(poll_data, str) else poll_data
             except (json.JSONDecodeError, TypeError):
                 continue
-            if data:
-                results.append({
-                    "url": row.get("url", "")[:100],
-                    "caption": (row.get("caption", "") or "")[:150],
-                    "percentages": data,
-                })
-        return results
+            if not data:
+                continue
+
+            pct_display = {}
+            winner_key = None
+            winner_pct = 0
+            for ck, pct in data.items():
+                candidate_name = CANDIDATES.get(ck, {}).get("name", ck)
+                pct_display[candidate_name] = pct
+                if pct > winner_pct:
+                    winner_pct = pct
+                    winner_key = ck
+
+            poll_result = {
+                "url": str(row.get("url", ""))[:200],
+                "caption": (str(row.get("caption", "")) or "")[:200],
+                "percentages": pct_display,
+                "winner": CANDIDATES.get(winner_key, {}).get("name", "?") if winner_key else "?",
+                "winner_key": winner_key,
+                "winner_pct": winner_pct,
+            }
+            poll_results_list.append(poll_result)
+
+            if winner_key:
+                candidate_win_counts[winner_key] = candidate_win_counts.get(winner_key, 0) + 1
+
+            for ck in data.keys():
+                candidate_total_polls[ck] = candidate_total_polls.get(ck, 0) + 1
+
+        win_summary = {}
+        for ck in CANDIDATES:
+            wins = candidate_win_counts.get(ck, 0)
+            total = candidate_total_polls.get(ck, 0)
+            if wins > 0:
+                win_summary[CANDIDATES[ck]["name"]] = {
+                    "wins": wins,
+                    "total_polls": total,
+                    "color": CANDIDATES[ck]["color"],
+                }
+
+        return poll_results_list, win_summary
 
     def _generate_conclusion(self, metrics_df):
         if metrics_df.empty:
@@ -187,45 +227,18 @@ class Aggregator:
         conclusion_parts = []
         conclusion_parts.append(f"Análisis basado en {int(total_posts)} posts recolectados.\n\n")
 
-        conclusion_parts.append("**Ranking de engagement:**\n")
+        conclusion_parts.append("**Candidatos con más presencia en redes:**\n")
         for i, c in enumerate(top3, 1):
             conclusion_parts.append(
                 f"{i}. **{c['candidate_name']}** ({c['party']}) — "
-                f"Score: {c['normalized_score']}% | "
                 f"{c['total_posts']} posts | "
                 f"{c['poll_posts']} encuestas | "
                 f"{c['total_reactions']} reacciones\n"
             )
 
-        conclusion_parts.append(f"\n**Conclusión:** ")
-        top = top3[0]
-        if len(top3) > 1:
-            gap = top['normalized_score'] - top3[1]['normalized_score']
-            if gap > 20:
-                conclusion_parts.append(
-                    f"{top['candidate_name']} lidera con una ventaja significativa "
-                    f"({gap:.0f}% más engagement)."
-                )
-            elif gap > 5:
-                conclusion_parts.append(
-                    f"{top['candidate_name']} lidera con ventaja moderada "
-                    f"({gap:.0f}% más). {top3[1]['candidate_name']} le sigue de cerca."
-                )
-            else:
-                conclusion_parts.append(
-                    f"Competencia reñida entre {top['candidate_name']} y "
-                    f"{top3[1]['candidate_name']} (diferencia de solo {gap:.0f}%)."
-                )
-        else:
-            conclusion_parts.append(
-                f"{top['candidate_name']} es el único candidato detectado en los datos."
-            )
-
-        conclusion_parts.append(
-            f"\n\n*Datos recolectados de fuentes publicas. "
-            f"Solo se cuentan datos observados directamente de cada URL. "
-            f"No se extrapola ni se inventa ningun dato.*"
-        )
+        conclusion_parts.append(f"\n*Los datos provienen de busquedas web publicas. "
+                                f"Para ver quien gana en cada encuesta individual, "
+                                f"revisa la seccion 'Quien GANA en las Encuestas' arriba.*")
 
         return "".join(conclusion_parts)
 
@@ -237,6 +250,7 @@ class Aggregator:
             "candidates_found": 0,
             "posts_with_real_dates": 0,
             "poll_percentages": [],
+            "poll_wins": {},
             "platform_breakdown": [],
             "candidate_rankings": [],
             "timeline": [],

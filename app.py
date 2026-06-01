@@ -11,7 +11,7 @@ from config import CANDIDATES, PLATFORMS
 from database.db import init_db, get_db
 from scraper.web_searcher import WebSearcher
 from scraper.instagram_scraper import InstagramScraper
-from scraper.post_fetcher import fetch_post_engagement, extract_date_from_text
+from scraper.post_fetcher import fetch_post_engagement, extract_date_from_text, fetch_reddit_data
 from analyzer.face_matcher import FaceMatcher
 from analyzer.reaction_analyzer import calculate_engagement, is_engagement_poll
 from analyzer.aggregator import Aggregator
@@ -207,37 +207,31 @@ def save_and_analyze(search_id, all_posts, face_matcher, ws, progress_callback=N
     enrich_count = 0
     for i, post in enumerate(all_posts):
         platform = post.get("platform", "web")
-        if platform in ("reddit", "facebook", "instagram"):
+        if platform == "reddit":
             if progress_callback:
-                progress_callback(f"Enriqueciendo engagement real {enrich_count+1}...", 0.95)
-            enriched = ws.enrich_post(post)
-            if enriched.get('likes') or enriched.get('comments_count') or enriched.get('reactions'):
-                post_row = db.execute(
-                    "SELECT id FROM posts WHERE platform=? AND post_id=?",
-                    (platform, str(post.get("post_id", ""))[:200])
-                ).fetchone()
-                if post_row:
-                    post_db_id = post_row["id"]
-                    likes = enriched.get('likes', 0)
-                    comments = enriched.get('comments_count', 0)
-                    if likes:
-                        db.execute("INSERT OR IGNORE INTO reactions (post_id, reaction_type, count) VALUES (?, ?, ?)",
-                                   (post_db_id, 'like', int(likes)))
-                    if comments:
-                        db.execute("INSERT OR IGNORE INTO reactions (post_id, reaction_type, count) VALUES (?, ?, ?)",
-                                   (post_db_id, 'comments', int(comments)))
-                    reactions = enriched.get('reactions', {})
-                    for rtype, rcount in reactions.items():
-                        if rcount:
+                progress_callback(f"Scrapeando Reddit {enrich_count+1}...", 0.95)
+            try:
+                reddit_data = fetch_reddit_data(post.get("url"))
+                if reddit_data:
+                    post_row = db.execute(
+                        "SELECT id FROM posts WHERE platform=? AND post_id=?",
+                        ("reddit", str(post.get("post_id", ""))[:200])
+                    ).fetchone()
+                    if post_row:
+                        pid = post_row["id"]
+                        score = reddit_data.get('likes', 0)
+                        comments = reddit_data.get('comments_count', 0)
+                        if score:
                             db.execute("INSERT OR IGNORE INTO reactions (post_id, reaction_type, count) VALUES (?, ?, ?)",
-                                       (post_db_id, str(rtype).lower(), int(rcount)))
-                    real_date = enriched.get('posted_at')
-                    if real_date:
-                        db.execute("UPDATE posts SET posted_at=? WHERE id=?", (real_date, post_db_id))
-                    image_url = enriched.get('image_url')
-                    if image_url and not post.get('image_url'):
-                        db.execute("UPDATE posts SET image_url=? WHERE id=?", (image_url, post_db_id))
-                    enrich_count += 1
+                                       (pid, 'upvotes', int(score)))
+                        if comments:
+                            db.execute("INSERT OR IGNORE INTO reactions (post_id, reaction_type, count) VALUES (?, ?, ?)",
+                                       (pid, 'comments', int(comments)))
+                        if reddit_data.get('posted_at'):
+                            db.execute("UPDATE posts SET posted_at=? WHERE id=?", (reddit_data['posted_at'], pid))
+                        enrich_count += 1
+            except Exception:
+                pass
 
     db.commit()
     db.execute("UPDATE searches SET status='completed' WHERE id=?", (search_id,))
@@ -467,19 +461,36 @@ def main():
                 st.plotly_chart(fig3, use_container_width=True)
 
         st.divider()
-        st.header("🗳️ Encuestas con porcentajes reales extraidos")
+        st.header("🗳️ Quien GANA en las Encuestas")
+        
+        poll_wins = result.get("poll_wins", {})
+        if poll_wins:
+            win_cols = st.columns(min(len(poll_wins), 4))
+            for i, (name, data) in enumerate(sorted(poll_wins.items(), key=lambda x: -x[1]["wins"])):
+                with win_cols[i % len(win_cols)]:
+                    st.metric(
+                        f"{name}",
+                        f"{data['wins']} encuestas",
+                        delta=f"de {data['total_polls']} en las que aparece",
+                    )
+        else:
+            st.caption("No se encontraron porcentajes para determinar ganadores.")
+
+        st.subheader("📋 Detalle de cada encuesta")
         poll_pcts = result.get("poll_percentages", [])
         if poll_pcts:
-            for pp in poll_pcts[:15]:
-                pcts_str = " | ".join(f"{k}: {v}%" for k, v in pp.get("percentages", {}).items())
-                with st.expander(f"📊 {pp.get('caption', '')[:120]}"):
-                    st.caption(pp.get("url", ""))
-                    if pcts_str:
-                        st.markdown(f"**Porcentajes:** {pcts_str}")
-                    else:
-                        st.caption("(encuesta detectada, porcentajes no parseables)")
+            for pp in poll_pcts[:20]:
+                pcts = pp.get("percentages", {})
+                pcts_sorted = sorted(pcts.items(), key=lambda x: -x[1])
+                pcts_str = "  |  ".join(f"**{n}**: {v}%" for n, v in pcts_sorted)
+                winner = pp.get("winner", "?")
+                
+                expander_label = f"{'🏆' if winner in pcts else '📊'} {winner} lidera — {pp.get('caption', '')[:100]}"
+                with st.expander(expander_label):
+                    st.markdown(pcts_str)
+                    st.caption(f"[{pp.get('url', '')[:100]}]({pp.get('url', '')})")
         else:
-            st.caption("No se detectaron porcentajes en los textos de las encuestas.")
+            st.caption("No se detectaron porcentajes en los textos. Probá keywords mas especificas como 'milei encuesta 2027 porcentaje'.")
 
         st.divider()
         st.header("🧠 Conclusion")

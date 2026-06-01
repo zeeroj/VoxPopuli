@@ -1,8 +1,10 @@
 import time
 import re
 import random
+import hashlib
 from urllib.parse import urlparse
 from ddgs import DDGS
+from config import CANDIDATES
 from scraper.post_fetcher import extract_date_from_text, fetch_post_engagement
 
 SOCIAL_PLATFORMS = {
@@ -73,25 +75,41 @@ def extract_post_id(url, platform):
 def extract_poll_percentages(text):
     if not text:
         return {}
+    from config import CANDIDATES
+
+    candidate_names = {}
+    for ck, info in CANDIDATES.items():
+        name = info["name"]
+        candidate_names[ck] = [name.lower()]
+        candidate_names[ck].extend(k.lower() for k in info.get("keywords", []))
+        candidate_names[ck].extend(t.lower().replace("#", "") for t in info.get("search_terms", []))
+
+    text_lower = text.lower()
+    pct_pattern = r'(\d{1,3})[.,](\d{1,2})?\s*%'
+    pct_matches = list(re.finditer(pct_pattern, text_lower))
+
     results = {}
-    patterns = [
-        r'(\w[\w\sáéíóúñ]{2,30}?)\s*[:\-]?\s*(\d{1,3})[.,]?(\d)?\s*%',
-        r'(\d{1,3})[.,]?(\d)?\s*%\s*(?:para|de)?\s*(\w[\w\sáéíóúñ]{2,30}?)',
-    ]
-    for pattern in patterns:
-        matches = re.findall(pattern, text, re.IGNORECASE)
-        for match in matches:
-            if len(match) >= 2:
-                try:
-                    if match[0].isdigit():
-                        pct = float(f"{match[0]}.{match[1] or '0'}")
-                        name = match[-1].strip()
-                    else:
-                        name = match[0].strip()
-                        pct = float(f"{match[1]}.{match[2] or '0'}")
-                    results[name.lower()] = pct
-                except (ValueError, IndexError):
-                    continue
+    for ck, names in candidate_names.items():
+        best_pct = None
+        best_dist = float('inf')
+        for name in names:
+            name_positions = [m.start() for m in re.finditer(re.escape(name), text_lower)]
+            if not name_positions:
+                continue
+            closest_name_pos = name_positions[0]
+            for pct_match in pct_matches:
+                dist = abs(pct_match.start() - closest_name_pos)
+                if dist < best_dist and dist < 300:
+                    best_dist = dist
+                    try:
+                        whole = pct_match.group(1)
+                        decimal = pct_match.group(2) or '0'
+                        best_pct = float(f"{whole}.{decimal}")
+                    except ValueError:
+                        continue
+        if best_pct is not None:
+            results[ck] = best_pct
+
     return results
 
 
@@ -126,7 +144,7 @@ class WebSearcher:
                 seen_urls.add(url)
 
                 platform = detect_platform(url)
-                post_id = extract_post_id(url, platform) if platform else url[:200]
+                post_id = extract_post_id(url, platform) if platform else hashlib.md5(url.encode()).hexdigest()[:16]
 
                 title = r.get("title", "") or ""
                 body = r.get("body", "") or ""
