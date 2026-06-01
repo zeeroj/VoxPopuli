@@ -1,4 +1,5 @@
 import pandas as pd
+import json
 from datetime import datetime, timedelta
 from database.db import get_db
 from config import CANDIDATES
@@ -119,6 +120,7 @@ class Aggregator:
         )
 
         posts_with_dates = int(df["posted_at"].notna().sum())
+        poll_percentages = self._extract_poll_percentages(df)
 
         return {
             "search_id": search_id,
@@ -126,6 +128,7 @@ class Aggregator:
             "total_poll_posts": int(df["is_poll"].sum()),
             "candidates_found": int(df["candidate_key"].nunique()),
             "posts_with_real_dates": posts_with_dates,
+            "poll_percentages": poll_percentages,
             "platform_breakdown": platform_breakdown.to_dict("records"),
             "candidate_rankings": metrics_df.to_dict("records"),
             "timeline": timeline,
@@ -152,6 +155,27 @@ class Aggregator:
         )
         timeline["date"] = timeline["date"].astype(str)
         return timeline.sort_values("date").to_dict("records")
+
+    def _extract_poll_percentages(self, df):
+        poll_rows = df[df["is_poll"] == 1]
+        if poll_rows.empty:
+            return []
+        results = []
+        for _, row in poll_rows.iterrows():
+            poll_data = row.get("poll_data")
+            if not poll_data or pd.isna(poll_data):
+                continue
+            try:
+                data = json.loads(poll_data) if isinstance(poll_data, str) else poll_data
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if data:
+                results.append({
+                    "url": row.get("url", "")[:100],
+                    "caption": (row.get("caption", "") or "")[:150],
+                    "percentages": data,
+                })
+        return results
 
     def _generate_conclusion(self, metrics_df):
         if metrics_df.empty:
@@ -212,6 +236,7 @@ class Aggregator:
             "total_poll_posts": 0,
             "candidates_found": 0,
             "posts_with_real_dates": 0,
+            "poll_percentages": [],
             "platform_breakdown": [],
             "candidate_rankings": [],
             "timeline": [],

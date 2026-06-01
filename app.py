@@ -145,31 +145,16 @@ def save_and_analyze(search_id, all_posts, face_matcher, ws, progress_callback=N
     db = get_db()
     total = len(all_posts)
     platforms_found = {}
-    enriched_count = 0
-    real_date_count = 0
 
     for i, post in enumerate(all_posts):
         pct = (i + 1) / total if total > 0 else 1
         platform = post.get("platform", "web")
         platforms_found[platform] = platforms_found.get(platform, 0) + 1
 
-        if progress_callback and i % 5 == 0:
-            platforms_str = ", ".join(
-                f"{PLATFORM_ICONS.get(p, '')} {p}({c})"
-                for p, c in sorted(platforms_found.items(), key=lambda x: -x[1])[:4]
-            )
-            progress_callback(
-                f"Enriqueciendo {i+1}/{total} | real={enriched_count} fechas={real_date_count} | {platforms_str}",
-                pct
-            )
+        if progress_callback and i % 10 == 0:
+            progress_callback(f"Guardando {i+1}/{total} posts...", pct)
 
-        enriched = ws.enrich_post(post)
-        if enriched.get('likes') or enriched.get('comments_count') or enriched.get('shares'):
-            enriched_count += 1
-        if enriched.get('posted_at'):
-            real_date_count += 1
-
-        posted_at = enriched.get("posted_at") or None
+        posted_at = post.get("posted_at") or None
 
         try:
             db.execute("""
@@ -177,70 +162,25 @@ def save_and_analyze(search_id, all_posts, face_matcher, ws, progress_callback=N
                 (search_id, platform, post_id, url, caption, image_url, posted_at, is_poll, poll_data)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
-                search_id, platform, str(enriched.get("post_id", ""))[:200],
-                enriched.get("url", ""), enriched.get("caption", ""),
-                enriched.get("image_url", None), posted_at,
-                1 if is_poll_post(enriched.get("caption", "")) else 0,
-                json.dumps(enriched.get("poll_results", {})) if enriched.get("poll_results") else None,
+                search_id, platform, str(post.get("post_id", ""))[:200],
+                post.get("url", ""), post.get("caption", ""),
+                post.get("image_url", None), posted_at,
+                1 if is_poll_post(post.get("caption", "")) else 0,
+                json.dumps(post.get("poll_results", {})) if post.get("poll_results") else None,
             ))
         except Exception:
             continue
 
         post_row = db.execute(
             "SELECT id FROM posts WHERE platform=? AND post_id=?",
-            (platform, str(enriched.get("post_id", ""))[:200])
+            (platform, str(post.get("post_id", ""))[:200])
         ).fetchone()
 
         if not post_row:
             continue
         post_db_id = post_row["id"]
 
-        reactions = enriched.get("reactions", {})
-        if reactions:
-            for rtype, rcount in reactions.items():
-                try:
-                    db.execute(
-                        "INSERT OR IGNORE INTO reactions (post_id, reaction_type, count) VALUES (?, ?, ?)",
-                        (post_db_id, str(rtype).lower(), int(rcount or 0)),
-                    )
-                except Exception:
-                    pass
-
-        likes = enriched.get("likes", 0)
-        comments = enriched.get("comments_count", 0)
-        if likes:
-            try:
-                db.execute(
-                    "INSERT OR IGNORE INTO reactions (post_id, reaction_type, count) VALUES (?, ?, ?)",
-                    (post_db_id, 'like', int(likes)),
-                )
-            except Exception:
-                pass
-        if comments:
-            try:
-                db.execute(
-                    "INSERT OR IGNORE INTO reactions (post_id, reaction_type, count) VALUES (?, ?, ?)",
-                    (post_db_id, 'comments', int(comments)),
-                )
-            except Exception:
-                pass
-
-        image_url = enriched.get("image_url")
-        if image_url:
-            tmp = download_image_for_post(image_url)
-            if tmp:
-                identifications = face_matcher.identify_person(tmp)
-                if os.path.exists(tmp):
-                    os.unlink(tmp)
-
-                for ident in identifications:
-                    db.execute("""
-                        INSERT OR IGNORE INTO post_candidates
-                        (post_id, candidate_key, confidence, detection_method)
-                        VALUES (?, ?, ?, ?)
-                    """, (post_db_id, ident["candidate_key"], ident["confidence"], "face_recognition"))
-
-        caption = enriched.get("caption", "") or ""
+        caption = post.get("caption", "") or ""
         caption_lower = caption.lower()
         for candidate_key, info in CANDIDATES.items():
             terms_to_check = list(info.get("search_terms", []))
@@ -261,6 +201,43 @@ def save_and_analyze(search_id, all_posts, face_matcher, ws, progress_callback=N
                             VALUES (?, ?, ?, ?)
                         """, (post_db_id, candidate_key, 0.7, "text_match"))
                     break
+
+    db.commit()
+
+    enrich_count = 0
+    for i, post in enumerate(all_posts):
+        platform = post.get("platform", "web")
+        if platform in ("reddit", "facebook", "instagram"):
+            if progress_callback:
+                progress_callback(f"Enriqueciendo engagement real {enrich_count+1}...", 0.95)
+            enriched = ws.enrich_post(post)
+            if enriched.get('likes') or enriched.get('comments_count') or enriched.get('reactions'):
+                post_row = db.execute(
+                    "SELECT id FROM posts WHERE platform=? AND post_id=?",
+                    (platform, str(post.get("post_id", ""))[:200])
+                ).fetchone()
+                if post_row:
+                    post_db_id = post_row["id"]
+                    likes = enriched.get('likes', 0)
+                    comments = enriched.get('comments_count', 0)
+                    if likes:
+                        db.execute("INSERT OR IGNORE INTO reactions (post_id, reaction_type, count) VALUES (?, ?, ?)",
+                                   (post_db_id, 'like', int(likes)))
+                    if comments:
+                        db.execute("INSERT OR IGNORE INTO reactions (post_id, reaction_type, count) VALUES (?, ?, ?)",
+                                   (post_db_id, 'comments', int(comments)))
+                    reactions = enriched.get('reactions', {})
+                    for rtype, rcount in reactions.items():
+                        if rcount:
+                            db.execute("INSERT OR IGNORE INTO reactions (post_id, reaction_type, count) VALUES (?, ?, ?)",
+                                       (post_db_id, str(rtype).lower(), int(rcount)))
+                    real_date = enriched.get('posted_at')
+                    if real_date:
+                        db.execute("UPDATE posts SET posted_at=? WHERE id=?", (real_date, post_db_id))
+                    image_url = enriched.get('image_url')
+                    if image_url and not post.get('image_url'):
+                        db.execute("UPDATE posts SET image_url=? WHERE id=?", (image_url, post_db_id))
+                    enrich_count += 1
 
     db.commit()
     db.execute("UPDATE searches SET status='completed' WHERE id=?", (search_id,))
@@ -488,6 +465,21 @@ def main():
                 )
                 fig3.update_layout(margin=dict(l=0, r=0, t=0, b=0))
                 st.plotly_chart(fig3, use_container_width=True)
+
+        st.divider()
+        st.header("🗳️ Encuestas con porcentajes reales extraidos")
+        poll_pcts = result.get("poll_percentages", [])
+        if poll_pcts:
+            for pp in poll_pcts[:15]:
+                pcts_str = " | ".join(f"{k}: {v}%" for k, v in pp.get("percentages", {}).items())
+                with st.expander(f"📊 {pp.get('caption', '')[:120]}"):
+                    st.caption(pp.get("url", ""))
+                    if pcts_str:
+                        st.markdown(f"**Porcentajes:** {pcts_str}")
+                    else:
+                        st.caption("(encuesta detectada, porcentajes no parseables)")
+        else:
+            st.caption("No se detectaron porcentajes en los textos de las encuestas.")
 
         st.divider()
         st.header("🧠 Conclusion")
