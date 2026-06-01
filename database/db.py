@@ -35,6 +35,7 @@ def init_db():
             scraped_at TEXT DEFAULT (datetime('now')),
             is_poll INTEGER DEFAULT 0,
             poll_data TEXT,
+            poll_reactions TEXT,
             FOREIGN KEY (search_id) REFERENCES searches(id),
             UNIQUE(platform, post_id)
         );
@@ -81,6 +82,10 @@ def init_db():
     conn.commit()
     try:
         conn.execute("ALTER TABLE posts ADD COLUMN poll_data TEXT")
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE posts ADD COLUMN poll_reactions TEXT")
     except Exception:
         pass
     conn.commit()

@@ -88,21 +88,23 @@ if st.session_state.get("trigger_search"):
         plat = post.get("platform", "web")
         posted_at = post.get("posted_at") or None
         poll_pcts = post.get("poll_results", {})
+        poll_rxs = post.get("poll_reactions", {})
 
-        if poll_pcts:
+        if poll_pcts or poll_rxs:
             polls_with_pct += 1
 
         try:
             db.execute("""
                 INSERT OR IGNORE INTO posts
-                (search_id, platform, post_id, url, caption, image_url, posted_at, is_poll, poll_data)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (search_id, platform, post_id, url, caption, image_url, posted_at, is_poll, poll_data, poll_reactions)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 sid, plat, str(post.get("post_id", ""))[:200],
                 post.get("url", ""), post.get("caption", ""),
                 post.get("image_url", None), posted_at,
-                1 if (is_poll_post(post.get("caption", "")) or poll_pcts) else 0,
+                1 if (is_poll_post(post.get("caption", "")) or poll_pcts or poll_rxs) else 0,
                 json.dumps(poll_pcts) if poll_pcts else None,
+                json.dumps(poll_rxs) if poll_rxs else None,
             ))
             saved += 1
         except Exception:
@@ -215,7 +217,7 @@ if result:
 
     if poll_details:
         st.divider()
-        st.header("📋 Detalle de cada encuesta (URL + % + engagement + interpretacion)")
+        st.header("📋 Encuestas con porcentajes")
         for pd_ in poll_details:
             pcts = pd_.get("percentages", {})
             sorted_p = sorted(pcts.items(), key=lambda x: -x[1])
@@ -225,14 +227,12 @@ if result:
             with st.expander(label):
                 st.markdown(pcts_str)
                 margin_str = f"(+{pd_['margin']} puntos sobre el segundo)"
-                eng_str = ""
                 eng_parts = []
                 if pd_.get("likes"):
                     eng_parts.append(f"👍 {pd_['likes']} likes")
                 if pd_.get("comments"):
                     eng_parts.append(f"💬 {pd_['comments']} comments")
-                if eng_parts:
-                    eng_str = " | ".join(eng_parts)
+                eng_str = " | ".join(eng_parts) if eng_parts else ""
 
                 st.markdown(f"**Interpretacion:** {pd_['winner']} "
                             f"{'GANO' if pd_['margin'] > 0 else 'EMPATO'} "
@@ -241,6 +241,30 @@ if result:
                 if eng_str:
                     st.markdown(eng_str)
                 st.markdown(f"📎 [{pd_.get('url', '')[:120]}]({pd_.get('url', '')})")
+
+    reaction_polls = result.get("reaction_polls", [])
+    if reaction_polls:
+        st.divider()
+        st.header("🎭 Encuestas por reacciones detectadas (❤️👍 = candidato en Facebook)")
+        st.caption("Estos posts contienen instrucciones como '❤️ para Milei, 👍 para Kicillof'. "
+                   "El mapping se extrajo del texto del post.")
+        for rp_ in reaction_polls[:20]:
+            rmap = rp_.get("reaction_mapping", {})
+            rmap_str = " | ".join(f"{rtype} → {cname}" for rtype, cname in rmap.items())
+            label = f"🎭 {rmap_str[:80]} — {rp_.get('caption', '')[:60]}"
+            with st.expander(label):
+                st.markdown(f"**Mapping detectado:**")
+                for rtype, cname in rmap.items():
+                    st.markdown(f"- **{rtype}** → **{cname}**")
+                st.markdown("💡 *Para determinar el ganador, habria que scrapear el post real y contar cuantas reacciones de cada tipo recibio.*")
+                eng_parts = []
+                if rp_.get("likes"):
+                    eng_parts.append(f"👍 {rp_['likes']} total")
+                if rp_.get("comments"):
+                    eng_parts.append(f"💬 {rp_['comments']} total")
+                if eng_parts:
+                    st.markdown(" | ".join(eng_parts))
+                st.markdown(f"📎 [{rp_.get('url', '')[:120]}]({rp_.get('url', '')})")
 
     if all_posts:
         st.divider()

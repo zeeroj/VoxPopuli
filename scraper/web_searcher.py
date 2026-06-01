@@ -91,6 +91,59 @@ def extract_post_id(url, platform):
     return match.group(1) if match else hashlib.md5(url.encode()).hexdigest()[:16]
 
 
+def extract_reaction_poll_mapping(text):
+    if not text:
+        return None
+
+    candidate_names = {}
+    for ck, info in CANDIDATES.items():
+        names = [info["name"].lower()]
+        names.extend(k.lower() for k in info.get("keywords", []))
+        names.extend(t.lower().replace("#", "") for t in info.get("search_terms", []))
+        candidate_names[ck] = list(set(names))
+
+    t = text.lower()
+    REACTION_KEYWORDS = {
+        "like": ["like", "me gusta", "👍"],
+        "love": ["love", "me encanta", "corazon", "corazón", "❤️", "🫶"],
+    }
+
+    detected_reaction_types = set()
+    for rtype, kws in REACTION_KEYWORDS.items():
+        for kw in kws:
+            if kw in t:
+                detected_reaction_types.add(rtype)
+
+    detected_candidates = set()
+    for ck, names in candidate_names.items():
+        for name in names:
+            if name and name in t:
+                detected_candidates.add(ck)
+
+    if len(detected_reaction_types) >= 2 and len(detected_candidates) >= 1:
+        mapping = {}
+        for rtype in list(detected_reaction_types)[:2]:
+            closest = None
+            closest_dist = float('inf')
+            for ck in detected_candidates:
+                names = candidate_names[ck]
+                for name in names:
+                    for m in re.finditer(re.escape(name), t):
+                        name_pos = m.start()
+                        kws = REACTION_KEYWORDS[rtype]
+                        for kw in kws:
+                            for rm in re.finditer(re.escape(kw), t):
+                                dist = abs(rm.start() - name_pos)
+                                if dist < closest_dist and dist < 250:
+                                    closest_dist = dist
+                                    closest = ck
+            if closest:
+                mapping[rtype] = closest
+        return mapping if len(mapping) >= 1 else None
+
+    return None
+
+
 def extract_poll_percentages(text):
     if not text:
         return {}
@@ -229,6 +282,7 @@ class WebSearcher:
                 caption = f"{title}\n{body}"[:2000]
                 likes, comments, shares = extract_engagement_from_text(body)
                 pp = extract_poll_percentages(title + " " + body)
+                rp = extract_reaction_poll_mapping(title + " " + body)
 
                 results.append({
                     "post_id": str(pid),
@@ -237,12 +291,13 @@ class WebSearcher:
                     "caption": caption,
                     "image_url": None,
                     "posted_at": None,
-                    "is_poll": bool(pp),
+                    "is_poll": bool(pp) or bool(rp),
                     "likes": likes,
                     "comments_count": comments,
                     "shares": shares,
                     "reactions": {},
                     "poll_results": pp,
+                    "poll_reactions": rp,
                     "source": "web_search",
                 })
         return results

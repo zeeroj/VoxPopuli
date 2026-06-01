@@ -13,7 +13,7 @@ class Aggregator:
         query = """
             SELECT p.id, p.platform, p.post_id, p.url, p.caption,
                    p.image_url, p.posted_at, p.scraped_at, p.is_poll,
-                   p.poll_data,
+                   p.poll_data, p.poll_reactions,
                    pc.candidate_key, pc.confidence, pc.detection_method,
                    c.name as candidate_name, c.party as candidate_party,
                    c.color as candidate_color
@@ -37,7 +37,8 @@ class Aggregator:
 
         poll_rows = df[df["is_poll"] == 1].copy()
         all_posts_list = self._build_post_list(df, reactions_df)
-        poll_details = self._analyze_polls(poll_rows, reactions_df)
+        pct_polls, reaction_polls = self._analyze_polls(poll_rows, reactions_df)
+        all_polls = pct_polls + reaction_polls
         rankings = self._rank_candidates(df, reactions_df)
 
         top = rankings[0]["candidate_name"] if rankings else "Sin datos"
@@ -48,10 +49,12 @@ class Aggregator:
             "total_poll_posts": int(poll_rows["id"].nunique()) if not poll_rows.empty else 0,
             "candidates_found": len(rankings),
             "all_posts": all_posts_list,
-            "poll_details": poll_details,
-            "poll_wins": self._summarize_wins(poll_details),
+            "poll_details": pct_polls,
+            "reaction_polls": reaction_polls,
+            "poll_wins": self._summarize_wins(pct_polls),
+            "reaction_poll_wins": self._summarize_reaction_wins(reaction_polls),
             "top_candidate": top,
-            "conclusion": self._conclusion(rankings, poll_details),
+            "conclusion": self._conclusion(rankings, pct_polls, reaction_polls),
         }
 
     def _build_post_list(self, df, reactions_df):
@@ -75,6 +78,13 @@ class Aggregator:
                     pcts = json.loads(poll_data) if isinstance(poll_data, str) else poll_data
                 except Exception:
                     pcts = {}
+            rp = row.get("poll_reactions")
+            reaction_map = {}
+            if rp and not pd.isna(rp):
+                try:
+                    reaction_map = json.loads(rp) if isinstance(rp, str) else rp
+                except Exception:
+                    reaction_map = {}
             winner = None
             margin = 0
             if pcts:
@@ -84,14 +94,18 @@ class Aggregator:
                     winner = CANDIDATES.get(best_ck, {}).get("name", best_ck)
                     if len(sorted_p) > 1:
                         margin = round(sorted_p[0][1] - sorted_p[1][1], 1)
+            elif reaction_map:
+                rnames = list(reaction_map.keys())
+                if rnames and len(rnames) == 2:
+                    winner = CANDIDATES.get(reaction_map.get(rnames[0]), {}).get("name", rnames[0])
 
-            caption = str(row.get("caption", "") or "")
             posts.append({
                 "id": pid,
                 "url": str(row.get("url", "")),
                 "platform": str(row.get("platform", "web")),
-                "caption": caption[:150],
+                "caption": (str(row.get("caption", "")) or "")[:150],
                 "poll_results": pcts,
+                "reaction_map": reaction_map,
                 "winner": winner,
                 "margin": margin,
                 "likes": likes,
@@ -103,28 +117,15 @@ class Aggregator:
         return posts
 
     def _analyze_polls(self, poll_rows, reactions_df):
-        details = []
+        pct_details = []
+        reaction_details = []
         seen = set()
+
         for _, row in poll_rows.iterrows():
             pid = row["id"]
             if pid in seen:
                 continue
             seen.add(pid)
-            poll_data = row.get("poll_data")
-            if not poll_data or pd.isna(poll_data):
-                continue
-            try:
-                pcts = json.loads(poll_data) if isinstance(poll_data, str) else poll_data
-            except Exception:
-                continue
-            if not pcts:
-                continue
-
-            sorted_items = sorted(pcts.items(), key=lambda x: -x[1])
-            best_ck = sorted_items[0][0]
-            winner = CANDIDATES.get(best_ck, {}).get("name", best_ck)
-            winner_pct = sorted_items[0][1]
-            margin = round(winner_pct - sorted_items[1][1], 1) if len(sorted_items) > 1 else 0
 
             likes = 0
             comments = 0
@@ -133,21 +134,55 @@ class Aggregator:
                 likes = int(rr[rr["reaction_type"] == "like"]["count"].sum()) if not rr.empty else 0
                 comments = int(rr[rr["reaction_type"] == "comments"]["count"].sum()) if not rr.empty else 0
 
-            pct_display = {}
-            for ck, pct in pcts.items():
-                pct_display[CANDIDATES.get(ck, {}).get("name", ck)] = pct
+            poll_data = row.get("poll_data")
+            if poll_data and not pd.isna(poll_data):
+                try:
+                    pcts = json.loads(poll_data) if isinstance(poll_data, str) else poll_data
+                except Exception:
+                    pcts = None
+                if pcts:
+                    sorted_items = sorted(pcts.items(), key=lambda x: -x[1])
+                    best_ck = sorted_items[0][0]
+                    winner = CANDIDATES.get(best_ck, {}).get("name", best_ck)
+                    winner_pct = sorted_items[0][1]
+                    margin = round(winner_pct - sorted_items[1][1], 1) if len(sorted_items) > 1 else 0
+                    pct_display = {}
+                    for ck, pct in pcts.items():
+                        pct_display[CANDIDATES.get(ck, {}).get("name", ck)] = pct
+                    pct_details.append({
+                        "url": str(row.get("url", "")),
+                        "caption": str(row.get("caption", ""))[:200],
+                        "percentages": pct_display,
+                        "winner": winner,
+                        "winner_pct": winner_pct,
+                        "margin": margin,
+                        "likes": likes,
+                        "comments": comments,
+                        "type": "pct",
+                    })
+                    continue
 
-            details.append({
-                "url": str(row.get("url", "")),
-                "caption": str(row.get("caption", ""))[:200],
-                "percentages": pct_display,
-                "winner": winner,
-                "winner_pct": winner_pct,
-                "margin": margin,
-                "likes": likes,
-                "comments": comments,
-            })
-        return details
+            rp = row.get("poll_reactions")
+            if rp and not pd.isna(rp):
+                try:
+                    reaction_map = json.loads(rp) if isinstance(rp, str) else rp
+                except Exception:
+                    reaction_map = None
+                if reaction_map:
+                    ck_mapping = {}
+                    for reaction_name_or_type, ck in reaction_map.items():
+                        candidate_name = CANDIDATES.get(ck, {}).get("name", ck)
+                        ck_mapping[reaction_name_or_type] = candidate_name
+                    reaction_details.append({
+                        "url": str(row.get("url", "")),
+                        "caption": str(row.get("caption", ""))[:200],
+                        "reaction_mapping": ck_mapping,
+                        "likes": likes,
+                        "comments": comments,
+                        "type": "reaction",
+                    })
+
+        return pct_details, reaction_details
 
     def _summarize_wins(self, poll_details):
         wins = {}
@@ -168,6 +203,23 @@ class Aggregator:
             ms = wins[w]["margins"]
             wins[w]["avg_margin"] = round(sum(ms) / len(ms), 1) if ms else 0.0
             del wins[w]["margins"]
+        return wins
+
+    def _summarize_reaction_wins(self, reaction_polls):
+        wins = {}
+        seen = set()
+        for rp in reaction_polls:
+            mapping = rp.get("reaction_mapping", {})
+            candidates_in_mapping = list(mapping.values())
+            if len(candidates_in_mapping) != 2:
+                continue
+            key = frozenset(candidates_in_mapping)
+            if key in seen:
+                continue
+            seen.add(key)
+            for cname in candidates_in_mapping:
+                wins.setdefault(cname, {"wins": 0, "total_polls": 0})
+                wins[cname]["total_polls"] += 1
         return wins
 
     def _rank_candidates(self, df, reactions_df):
@@ -199,23 +251,30 @@ class Aggregator:
             r["score"] = round(r["total_posts"] / max_score * 100, 1)
         return rankings
 
-    def _conclusion(self, rankings, poll_details):
-        if not rankings and not poll_details:
+    def _conclusion(self, rankings, pct_polls, reaction_polls):
+        if not rankings and not pct_polls and not reaction_polls:
             return "No se encontraron datos."
 
         lines = []
         total = sum(r["total_posts"] for r in rankings)
         lines.append(f"Analisis basado en {total} posts recolectados.\n")
 
-        if poll_details:
-            wins = self._summarize_wins(poll_details)
-            lines.append("**Resultados de encuestas con porcentajes:**\n")
+        if pct_polls:
+            wins = self._summarize_wins(pct_polls)
+            lines.append("**Encuestas con porcentajes:**\n")
             for name, data in sorted(wins.items(), key=lambda x: -x[1]["wins"]):
                 lines.append(
                     f"- **{name}**: gana en {data['wins']}/{data['total_polls']} "
-                    f"encuestas ({round(data['wins']/data['total_polls']*100)}%) "
-                    f"| margen promedio +{data['avg_margin']} puntos\n"
+                    f"({round(data['wins']/data['total_polls']*100)}%) "
+                    f"| margen +{data['avg_margin']} pts\n"
                 )
+
+        if reaction_polls:
+            rw = self._summarize_reaction_wins(reaction_polls)
+            lines.append("\n**Encuestas por reacciones detectadas:**\n")
+            for name, data in sorted(rw.items(), key=lambda x: -x[1]["total_polls"]):
+                lines.append(f"- **{name}**: aparece en {data['total_polls']} encuestas con mapping de reacciones\n")
+            lines.append("\n  (El ganador por reacciones requiere visitar el post y contar cada tipo de reaccion)\n")
 
         lines.append("\n**Presencia en plataformas:**\n")
         for r in rankings[:5]:
@@ -232,7 +291,9 @@ class Aggregator:
             "candidates_found": 0,
             "all_posts": [],
             "poll_details": [],
+            "reaction_polls": [],
             "poll_wins": {},
+            "reaction_poll_wins": {},
             "top_candidate": "Sin datos",
             "conclusion": "No se encontraron datos.",
         }
