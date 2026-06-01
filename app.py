@@ -8,7 +8,7 @@ import time
 from config import CANDIDATES, PLATFORMS
 from database.db import init_db, get_db
 from scraper.web_searcher import WebSearcher
-from scraper.post_fetcher import fetch_reddit_data
+from scraper.post_fetcher import fetch_reddit_data, fetch_reddit_comments, analyze_comments_for_candidates
 from analyzer.aggregator import Aggregator
 from utils.helpers import is_poll_post
 
@@ -151,7 +151,8 @@ if st.session_state.get("trigger_search"):
         if post.get("platform") == "reddit":
             progress_bar.progress(0.8, text=f"Scrapeando Reddit {reddit_count+1}...")
             try:
-                rd = fetch_reddit_data(post.get("url"))
+                url = post.get("url")
+                rd = fetch_reddit_data(url)
                 if rd:
                     pr = db.execute("SELECT id FROM posts WHERE platform='reddit' AND post_id=?",
                                     (str(post.get("post_id", ""))[:200])).fetchone()
@@ -167,6 +168,13 @@ if st.session_state.get("trigger_search"):
                                        (pid, 'comments', coms))
                         if rd.get("posted_at"):
                             db.execute("UPDATE posts SET posted_at=? WHERE id=?", (rd["posted_at"], pid))
+
+                        comments = fetch_reddit_comments(url)
+                        if comments:
+                            analysis = analyze_comments_for_candidates(comments, CANDIDATES)
+                            if analysis:
+                                db.execute("UPDATE posts SET poll_reactions=? WHERE id=?",
+                                           (json.dumps({"reddit_comments": analysis}), pid))
                         reddit_count += 1
             except Exception:
                 pass
@@ -245,25 +253,21 @@ if result:
     reaction_polls = result.get("reaction_polls", [])
     if reaction_polls:
         st.divider()
-        st.header("🎭 Encuestas por reacciones detectadas (❤️👍 = candidato en Facebook)")
-        st.caption("Estos posts contienen instrucciones como '❤️ para Milei, 👍 para Kicillof'. "
-                   "El mapping se extrajo del texto del post.")
+        st.header("🎭 Reddit: Comentarios reales analizados")
+        st.caption("Comentarios extraidos via Reddit JSON API. Se cuentan menciones a cada candidato en los comentarios.")
         for rp_ in reaction_polls[:20]:
-            rmap = rp_.get("reaction_mapping", {})
-            rmap_str = " | ".join(f"{rtype} → {cname}" for rtype, cname in rmap.items())
-            label = f"🎭 {rmap_str[:80]} — {rp_.get('caption', '')[:60]}"
-            with st.expander(label):
-                st.markdown(f"**Mapping detectado:**")
-                for rtype, cname in rmap.items():
-                    st.markdown(f"- **{rtype}** → **{cname}**")
-                st.markdown("💡 *Para determinar el ganador, habria que scrapear el post real y contar cuantas reacciones de cada tipo recibio.*")
-                eng_parts = []
-                if rp_.get("likes"):
-                    eng_parts.append(f"👍 {rp_['likes']} total")
-                if rp_.get("comments"):
-                    eng_parts.append(f"💬 {rp_['comments']} total")
-                if eng_parts:
-                    st.markdown(" | ".join(eng_parts))
+            analysis = rp_.get("reddit_comments_analysis", {})
+            if not analysis:
+                continue
+            rp_label = f"🤖 Reddit — {rp_.get('caption', '')[:80]}"
+            with st.expander(rp_label):
+                st.markdown(f"**Menciones en comentarios:**")
+                for ck, data in sorted(analysis.items(), key=lambda x: -x[1].get("mentions", 0)):
+                    cname = CANDIDATES.get(ck, {}).get("name", ck)
+                    avg_score = round(sum(data.get("comment_scores", [])) / max(len(data.get("comment_scores", [])), 1), 1)
+                    st.markdown(f"- **{cname}**: {data['mentions']} menciones | promedio +{avg_score} pts por comentario")
+                    for sc in data.get("sample_comments", []):
+                        st.caption(f"  > {sc[:120]}")
                 st.markdown(f"📎 [{rp_.get('url', '')[:120]}]({rp_.get('url', '')})")
 
     if all_posts:
