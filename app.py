@@ -246,10 +246,13 @@ if result:
 
     if poll_wins:
         st.divider()
-        st.header("🏆 Quien GANA en las Encuestas (con % reales)")
-        cols = st.columns(min(len(poll_wins), 4))
+        head_to_head = result.get("head_to_head", 0)
+        st.header(f"🏆 Quien GANA en las Encuestas (vs directo, {head_to_head} comparaciones)")
+        st.caption("Solo se cuentan encuestas donde aparecen 2+ candidatos con %. Las menciones unicas no cuentan como victoria.")
+        num_cols = min(len(poll_wins), 4)
+        cols = st.columns(num_cols)
         for i, (name, data) in enumerate(sorted(poll_wins.items(), key=lambda x: -x[1]["wins"])):
-            with cols[i]:
+            with cols[i % num_cols]:
                 st.metric(name, f"Gana {data['wins']}/{data['total_polls']}",
                           delta=f"+{data['avg_margin']} pts promedio")
 

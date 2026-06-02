@@ -47,6 +47,7 @@ class Aggregator:
             "search_id": search_id,
             "total_posts": len(df["id"].unique()),
             "total_poll_posts": int(poll_rows["id"].nunique()) if not poll_rows.empty else 0,
+            "head_to_head": sum(1 for p in pct_polls if p.get("head_to_head")),
             "candidates_found": len(rankings),
             "all_posts": all_posts_list,
             "poll_details": pct_polls,
@@ -124,6 +125,7 @@ class Aggregator:
             winner = None
             winner_pct = 0
             margin = 0
+            num_candidates = 0
             pct_display = {}
             reddit_comments = {}
 
@@ -136,9 +138,10 @@ class Aggregator:
                 if pcts:
                     sorted_items = sorted(pcts.items(), key=lambda x: -x[1])
                     best_ck = sorted_items[0][0]
-                    winner = CANDIDATES.get(best_ck, {}).get("name", best_ck)
+                    num_candidates = len(sorted_items)
+                    winner = CANDIDATES.get(best_ck, {}).get("name", best_ck) if num_candidates >= 2 else None
                     winner_pct = sorted_items[0][1]
-                    margin = round(winner_pct - sorted_items[1][1], 1) if len(sorted_items) > 1 else 0
+                    margin = round(winner_pct - sorted_items[1][1], 1) if num_candidates > 1 else 0
                     pct_display = {}
                     for ck, pct in pcts.items():
                         pct_display[CANDIDATES.get(ck, {}).get("name", ck)] = pct
@@ -162,6 +165,7 @@ class Aggregator:
                 "likes": likes,
                 "comments": comments,
                 "type": "pct",
+                "head_to_head": num_candidates >= 2,
                 "reddit_comments_analysis": reddit_comments,
             })
 
@@ -172,12 +176,12 @@ class Aggregator:
         total_per_candidate = {}
         for pd_ in poll_details:
             w = pd_.get("winner")
-            if not w:
+            if not w or not pd_.get("head_to_head"):
                 continue
             total_per_candidate[w] = total_per_candidate.get(w, 0) + 1
         for pd_ in poll_details:
             w = pd_.get("winner")
-            if not w:
+            if not w or not pd_.get("head_to_head"):
                 continue
             wins.setdefault(w, {"wins": 0, "total_polls": total_per_candidate.get(w, 0), "margins": []})
             wins[w]["wins"] += 1
@@ -262,6 +266,7 @@ class Aggregator:
             "search_id": None,
             "total_posts": 0,
             "total_poll_posts": 0,
+            "head_to_head": 0,
             "candidates_found": 0,
             "all_posts": [],
             "poll_details": [],
